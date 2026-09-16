@@ -1,0 +1,25 @@
+# Secrets — never commit. Only .env.example (placeholders) is tracked.
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Local data / generated media
+*.db
+*.sqlite
+*.sqlite3
+filler-pool/audio/
+test-assets/
+tracks/
+logs/
+*.log
+
+# OS cruft
+.DS_Store
