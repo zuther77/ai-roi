@@ -86,6 +86,15 @@ fi
 # All overridable from .env later without editing this file. Bitrates are bare
 # numbers in kbps so the buffer size can be derived arithmetically below.
 
+# How many times FFmpeg should repeat the audio file itself.
+#
+#    0  play it once and exit  — the Day 2 default. playout_controller.py
+#       drives the rotation, so FFmpeg must hand control back when a track
+#       ends rather than looping internally.
+#   -1  repeat forever — Day 1's behaviour, still available for a quick
+#       single-file test with `docker compose run`.
+STREAM_LOOP="${STREAM_LOOP:-0}"
+
 VIDEO_WIDTH="${VIDEO_WIDTH:-1280}"
 VIDEO_HEIGHT="${VIDEO_HEIGHT:-720}"
 FRAMERATE="${FRAMERATE:-30}"
@@ -130,17 +139,18 @@ FFMPEG_ARGS=(
     -re -loop 1 -framerate "$FRAMERATE" -i "$IMAGE_FILE"
 
     # --- Input 1: the audio track ------------------------------------------
-    # -stream_loop -1 restarts the file forever when it reaches the end. This
-    #     is the single most important flag today, and the plan's first listed
-    #     pitfall. Without it FFmpeg plays the track once and then streams
-    #     silence over a still image — the video keeps flowing, so it presents
-    #     as a network problem when it is nothing of the sort.
-    #     It must appear BEFORE -i; it is an input option and is silently
-    #     ignored if placed after.
+    # -stream_loop controls repetition of this input. On Day 1 it was hardcoded
+    #     to -1 (forever), which was the plan's first listed pitfall: without
+    #     it FFmpeg played the track once and then streamed silence over a
+    #     still image, which presents as a network fault when it is nothing of
+    #     the sort. Day 2 sets it to 0 so the controller can advance to the
+    #     next track, and the silence problem is now prevented by -shortest
+    #     below instead.
+    #     It must appear BEFORE -i; as an output option it is silently ignored.
     # -re reads at the file's real playback speed instead of as fast as the
     #     disk allows. Live output needs wall-clock pacing, otherwise FFmpeg
     #     races ahead of real time and YouTube drops the connection.
-    -re -stream_loop -1 -i "$AUDIO_FILE"
+    -re -stream_loop "$STREAM_LOOP" -i "$AUDIO_FILE"
 
     # State explicitly which stream comes from which input rather than relying
     # on FFmpeg's automatic stream selection.
@@ -179,6 +189,17 @@ FFMPEG_ARGS=(
     -ac 2
 )
 
+# -shortest ends the output when the shortest input runs out.
+#
+# This is essential once STREAM_LOOP is finite. The image input uses -loop 1,
+# so it never ends on its own; without -shortest, FFmpeg would keep streaming
+# a still picture in silence after the track finished and never hand control
+# back to the controller. When STREAM_LOOP is -1 both inputs are infinite and
+# the flag is pointless, so it is only added when it does something.
+if [[ "$STREAM_LOOP" != "-1" ]]; then
+    FFMPEG_ARGS+=( -shortest )
+fi
+
 # The destination is appended last, and depends on whether this is a real
 # broadcast or a dry run.
 if [[ "$DRY_RUN" == "1" ]]; then
@@ -199,7 +220,7 @@ fi
 # Log the configuration, but print only the RTMP base — never the assembled
 # target, because that string ends in the stream key and these lines are
 # visible to anyone who runs `docker compose logs`.
-echo "playout: audio  ${AUDIO_FILE}"
+echo "playout: audio  ${AUDIO_FILE} (stream_loop=${STREAM_LOOP})"
 echo "playout: image  ${IMAGE_FILE}"
 echo "playout: video  ${VIDEO_WIDTH}x${VIDEO_HEIGHT} @ ${FRAMERATE}fps, keyframe every $(( GOP / FRAMERATE ))s, ${VIDEO_BITRATE_KBPS}kbps"
 
@@ -209,9 +230,12 @@ else
     echo "playout: target ${YOUTUBE_RTMP_URL%/}/<stream-key-hidden>"
 fi
 
-# `exec` replaces this shell with FFmpeg rather than spawning it as a child, so
-# FFmpeg becomes PID 1 and receives Docker's stop signals directly. Without it,
-# `docker compose down` would signal bash while FFmpeg ignored it and got
-# force-killed once the timeout expired — which is the difference between the
-# YouTube stream ending cleanly and it hanging until YouTube times it out.
+# `exec` replaces this shell with FFmpeg rather than spawning it as a child.
+# On Day 1 that made FFmpeg PID 1, receiving Docker's stop signal directly.
+# Since Day 2 the controller is PID 1 and this script is its child, but exec
+# still matters: it removes a pointless bash process from the middle of the
+# signal path, so a stop reaches FFmpeg itself rather than a shell that would
+# ignore it and let FFmpeg be force-killed on timeout. That is the difference
+# between the YouTube stream ending cleanly and hanging until YouTube times
+# it out.
 exec ffmpeg "${FFMPEG_ARGS[@]}"

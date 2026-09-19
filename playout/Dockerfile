@@ -26,14 +26,25 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# Copied as its own step so that editing the script only rebuilds this tiny
-# layer, not the (slow) apt layer above it.
+# Copied as its own step so that editing these only rebuilds this tiny layer,
+# not the (slow) apt layer above it.
+#
+# No requirements.txt and no pip install: the controller and filler pool use
+# only the Python standard library (sqlite3, subprocess, dataclasses), so the
+# image needs nothing beyond what python:3.12-slim already ships. Tests run on
+# stdlib unittest for the same reason.
 COPY stream.sh /app/stream.sh
+COPY filler_pool.py playout_controller.py test_filler_pool.py /app/
 RUN chmod +x /app/stream.sh
 
 # CMD rather than ENTRYPOINT, deliberately. CMD is the default action but stays
 # overridable, so ad-hoc debugging still works:
 #     docker compose run playout ffmpeg -version
+#     docker compose run playout python -m unittest discover -s /app
 #     docker compose run playout bash
-# An ENTRYPOINT would swallow those arguments and try to feed them to stream.sh.
-CMD ["/app/stream.sh"]
+# An ENTRYPOINT would swallow those arguments and feed them to the controller.
+#
+# Day 1 ran stream.sh directly, which looped a single file forever. Day 2 puts
+# the controller in front: it decides which track plays and calls stream.sh
+# once per track.
+CMD ["python", "/app/playout_controller.py"]
