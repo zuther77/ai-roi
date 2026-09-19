@@ -1,0 +1,42 @@
+# Docker Compose is the single entry point for everything that runs on the
+# master (design spec Section 1.5). Today it holds exactly one service, but
+# this is the shape the rest of the project slots into: Postgres and Redis
+# become siblings of `playout` in Sprints 2 and 3, and in production one
+# systemd unit does nothing but run `docker compose up -d` against this file.
+#
+# There is no `version:` key — it was deprecated by Compose and current
+# versions warn if you include it.
+
+services:
+  # The playout service: reads an audio file, pairs it with a still image,
+  # encodes both, and pushes the result to YouTube over RTMP.
+  playout:
+    # Build from ./playout/Dockerfile rather than pulling a prebuilt image,
+    # since we need ffmpeg baked in alongside our own script.
+    build: ./playout
+
+    # Loads .env into the container's environment. This is what makes
+    # YOUTUBE_STREAM_KEY readable by stream.sh at runtime.
+    #
+    # Worth being precise about, because Compose uses .env for two unrelated
+    # things: this line injects the variables into the *container*, while
+    # Compose separately reads the same file to substitute ${VARIABLES} inside
+    # this YAML. Only the first matters here.
+    #
+    # The key is never written into this file, which is committed. It stays in
+    # .env, which is gitignored.
+    env_file: .env
+
+    volumes:
+      # Mount the host's test-assets directory into the container, read-only.
+      #
+      # Mounting rather than COPYing into the image means you can swap the
+      # audio file and restart, with no rebuild. `:ro` is deliberate: playout
+      # only ever reads these files, so the container has no business writing
+      # to your working tree.
+      - ./test-assets:/app/test-assets:ro
+
+    # No `restart:` policy yet — that is Day 3's job, along with the systemd
+    # boot trigger. Today the goal is only to prove the stream works at all,
+    # and a container that silently restarts would hide a startup failure we
+    # actually want to see.
