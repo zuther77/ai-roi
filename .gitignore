@@ -15,8 +15,13 @@ venv/
 *.db
 *.sqlite
 *.sqlite3
-filler-pool/audio/
 tracks/
+
+# Filler pool: audio files, the SQLite database and the now-playing file are
+# all runtime state. Same pattern as test-assets — keep the directory and its
+# README in git, keep everything else out.
+filler-pool/*
+!filler-pool/README.md
 
 # Audio and images stay out of git (they are large, and some are only
 # licensed for local use) but the directory and its README are tracked so a

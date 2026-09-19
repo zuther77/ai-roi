@@ -34,7 +34,20 @@ services:
       # audio file and restart, with no rebuild. `:ro` is deliberate: playout
       # only ever reads these files, so the container has no business writing
       # to your working tree.
+      #
+      # Day 2 no longer streams from here — the filler pool below supplies the
+      # audio — but image.jpg is still the video layer, so the mount stays.
       - ./test-assets:/app/test-assets:ro
+
+      # The filler pool (Day 2). Writable, unlike test-assets, because three
+      # things inside it are written at runtime:
+      #   audio/             your tracks (read only in practice)
+      #   filler.db          the SQLite metadata store
+      #   current_track.txt  the "now playing" file
+      # Keeping the database on a mounted volume rather than inside the
+      # container means play counts and history survive a rebuild, which is
+      # what Day 3's crash-recovery testing depends on.
+      - ./filler-pool:/app/filler-pool
 
     # No `restart:` policy yet — that is Day 3's job, along with the systemd
     # boot trigger. Today the goal is only to prove the stream works at all,
