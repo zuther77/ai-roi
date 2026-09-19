@@ -34,7 +34,22 @@ set -euo pipefail
 # it cannot leak into `docker compose logs`.
 
 : "${YOUTUBE_RTMP_URL:?not set. Copy .env.example to .env and fill it in.}"
-: "${YOUTUBE_STREAM_KEY:?not set. Get it from YouTube Studio > Create > Go Live > Stream settings.}"
+
+# DRY_RUN=1 encodes to nowhere instead of pushing to YouTube. This exists so
+# encoder and filter changes can be checked without consuming a live stream
+# slot or briefly appearing on the channel — and so a fresh clone with no
+# stream key can still verify the pipeline runs.
+#
+# Not part of the plan's Day 1 tasks; added because "does FFmpeg accept these
+# arguments" and "does YouTube accept this stream" are worth failing
+# separately rather than debugging as one combined step.
+DRY_RUN="${DRY_RUN:-0}"
+
+# Only a real broadcast needs the key, so this check lives behind the dry-run
+# branch.
+if [[ "$DRY_RUN" != "1" ]]; then
+    : "${YOUTUBE_STREAM_KEY:?not set. Get it from YouTube Studio > Create > Go Live > Stream settings.}"
+fi
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +103,9 @@ GOP=$(( FRAMERATE * 2 ))
 
 # Stripping a trailing slash means either "rtmp://.../live2" or
 # "rtmp://.../live2/" in .env produces a valid target.
-RTMP_TARGET="${YOUTUBE_RTMP_URL%/}/${YOUTUBE_STREAM_KEY}"
+# ${VAR:-} supplies an empty default so this line does not trip `set -u` during
+# a dry run, where the key is intentionally absent.
+RTMP_TARGET="${YOUTUBE_RTMP_URL%/}/${YOUTUBE_STREAM_KEY:-}"
 
 
 # ---------------------------------------------------------------------------
@@ -160,11 +177,20 @@ FFMPEG_ARGS=(
     -b:a "${AUDIO_BITRATE_KBPS}k"
     -ar 44100
     -ac 2
-
-    # FLV is the container format RTMP requires.
-    -f flv
-    "$RTMP_TARGET"
 )
+
+# The destination is appended last, and depends on whether this is a real
+# broadcast or a dry run.
+if [[ "$DRY_RUN" == "1" ]]; then
+    # -t stops after a fixed number of seconds (the inputs loop forever, so
+    # without this it would never exit). -f null discards the encoded output
+    # while still running every filter and both encoders, so any argument
+    # error or bad filter graph still surfaces.
+    FFMPEG_ARGS+=( -t "${DRY_RUN_SECONDS:-5}" -f null - )
+else
+    # FLV is the container format RTMP requires.
+    FFMPEG_ARGS+=( -f flv "$RTMP_TARGET" )
+fi
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +202,12 @@ FFMPEG_ARGS=(
 echo "playout: audio  ${AUDIO_FILE}"
 echo "playout: image  ${IMAGE_FILE}"
 echo "playout: video  ${VIDEO_WIDTH}x${VIDEO_HEIGHT} @ ${FRAMERATE}fps, keyframe every $(( GOP / FRAMERATE ))s, ${VIDEO_BITRATE_KBPS}kbps"
-echo "playout: target ${YOUTUBE_RTMP_URL%/}/<stream-key-hidden>"
+
+if [[ "$DRY_RUN" == "1" ]]; then
+    echo "playout: DRY RUN — encoding ${DRY_RUN_SECONDS:-5}s to nowhere, YouTube will not be contacted"
+else
+    echo "playout: target ${YOUTUBE_RTMP_URL%/}/<stream-key-hidden>"
+fi
 
 # `exec` replaces this shell with FFmpeg rather than spawning it as a child, so
 # FFmpeg becomes PID 1 and receives Docker's stop signals directly. Without it,
