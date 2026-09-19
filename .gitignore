@@ -16,8 +16,13 @@ venv/
 *.sqlite
 *.sqlite3
 filler-pool/audio/
-test-assets/
 tracks/
+
+# Audio and images stay out of git (they are large, and some are only
+# licensed for local use) but the directory and its README are tracked so a
+# fresh clone knows what belongs here.
+test-assets/*
+!test-assets/README.md
 logs/
 *.log
 
