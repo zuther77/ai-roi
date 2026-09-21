@@ -7,7 +7,12 @@ subprocess, no filesystem and no network. They run in milliseconds.
 
 Run them with:
 
-    docker compose run --rm playout python -m unittest discover -s /app -v
+    docker compose run --rm playout python -m unittest -v
+
+No -s flag is needed: the image's WORKDIR is /app, and bare ``unittest``
+discovers from the current directory. Keeping the command short also stops it
+from line-wrapping when copied into a terminal, which silently breaks the
+longer ``discover -s /app`` form.
 
 stdlib ``unittest`` is used rather than pytest so no extra dependency has to be
 installed into the image just to run tests.
