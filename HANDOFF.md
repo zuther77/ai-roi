@@ -177,11 +177,16 @@ Still outstanding, and only the owner can do these:
 - [ ] Stream runs ≥2 hours playing visibly different tracks
 - [ ] `play_count` increments and no track repeats back-to-back in a real run
 
-**`filler-pool/audio/` currently holds five synthetic sine tones** (6–10s each)
-that were generated to prove the rotation. They must be deleted and replaced
-with 5–10 real royalty-free tracks before the 2-hour run — a 2-hour test of
-sine tones is both unpleasant and unconvincing. Deleting files is safe; the
-controller drops their rows on next start.
+**The pool is ready.** The synthetic sine tones used during development have
+been replaced with 12 real royalty-free tracks (IDs 6–17), durations 122–254s,
+averaging 161s — about 32 minutes of audio, so a 2-hour run cycles it roughly
+3.7 times. The database reconciled itself on the next container start: the five
+tone rows were dropped and the new files added with `ffprobe` durations, with no
+manual intervention. That exercised the remove-and-add path of
+`sync_from_disk()` successfully.
+
+A `.DS_Store` file in `filler-pool/audio/` is correctly ignored by the
+`AUDIO_EXTENSIONS` filter rather than being handed to `ffprobe`.
 
 ---
 
