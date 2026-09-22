@@ -3,11 +3,15 @@
 For an agent or developer picking this project up cold. Read this first, then
 the two design documents in the section below.
 
-**Status as of 2026-09-22:** **Sprint 1 complete** (Days 1–3 + Option A
-gapless), verified by the owner on the MacBook. **Master is moving to Linux
-before Sprint 2** (owner decision — better fit for Redis bind + NFS to DELL).
-Day 4 not started; do not start Day 4 until Sprint 1 compose runs on the
-Linux master and the DELL direct link is available.
+**Status as of 2026-09-22:** **Sprint 1 complete** (Days 1-3 + Option A
+gapless), verified on the MacBook **and re-verified on the Linux master** -
+owner confirmed the live stream healthy after `docker compose up -d --build`.
+The master is now the Linux box. **Day 4 implemented** - Redis as a Compose
+service published only on `192.168.50.1:6379`, DELL worker skeleton
+(`worker/dell_worker.py`), master-side fake-job push
+(`worker/push_test_job.sh`). Master-side round-trip (push -> claim -> ack)
+machine-verified in Docker; **owner verification on DELL still pending**.
+Do not start Day 5 until the Day 4 acceptance criteria are owner-verified.
 
 ---
 
@@ -127,7 +131,7 @@ Remote: `https://github.com/zuther77/ai-roi` — **public**, `main` branch.
 .env                     gitignored; holds the real YouTube stream key
 .env.example             committed template, no real values
 .gitignore
-docker-compose.yml       one service (playout); Postgres and Redis join later
+docker-compose.yml       playout + redis (Day 4); Postgres joins in Sprint 3
 README.md
 HANDOFF.md               this file
 filler-pool/
@@ -142,6 +146,13 @@ playout/
   filler_pool.py         SQLite store + pure pick_next_track()
   playout_controller.py  builds playlist, one long-lived FFmpeg, repeats
   test_filler_pool.py    9 stdlib unittest tests
+worker/
+  dell_worker.py          Day 4 DELL skeleton: stdlib-only RESP2 client,
+                         atomic BRPOPLPUSH claim loop (jobs:pending →
+                         jobs:in_progress), reconnects forever, no pip deps
+  push_test_job.sh        master-side fake-job push; redis-cli runs inside
+                         the redis container, password never in argv
+  README.md               how to run on DELL; what is deliberately not here yet
 test-assets/
   README.md              committed; image.jpg and track.mp3 are gitignored
 ```
@@ -234,14 +245,15 @@ Do not start unless the owner asks; Option A is the Sprint 1 path.
 
 ---
 
-## 8. Next step: Day 4
+## 8. Next step: finish Day 4 verification, then Day 5
 
-Sprint 2 — network + Redis job queue with DELL. Read `detailed-plan.md` Day 4.
-
-**Prerequisites (owner):** Linux master running Sprint 1 stack; Cat5e/Cat6
-master↔DELL; static `192.168.50.1` / `.2`; bidirectional ping; master internet
-intact. Then: Redis in Compose bound to the private-subnet IP, job schema,
-DELL-side claim script, master-side fake push.
+Day 4 is implemented. Remaining owner verification (on the DELL, per the
+acceptance criteria in `detailed-plan.md` Day 4): run `worker/dell_worker.py`
+on DELL against the master's Redis, push a fake job from the master
+(`./worker/push_test_job.sh`), and confirm the worker claims it exactly once;
+then kill the worker mid-claim and confirm a restart does **not** re-claim the
+orphaned job sitting in `jobs:in_progress`. After that, Day 5 (real
+generation, containerized).
 
 ---
 
