@@ -1,5 +1,6 @@
 # ai-roi
-AI generated music livestreamed on YT
+AI generated music livestreamed on YT. 
+Implemeted initial stream with static image contianerized into docker. 
 
 
 ## Current Architecture 
