@@ -33,6 +33,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
@@ -182,9 +183,37 @@ def play_once(track_path: str) -> int:
     return result.returncode
 
 
+def start_crash_watcher() -> None:
+    """Watch for filler-pool/FORCE_CRASH even while FFmpeg is blocking.
+
+    The main loop only runs between tracks (minutes apart). A background
+    watcher is required so Day 3 crash-recovery tests can fire immediately.
+    """
+
+    def _watch() -> None:
+        flag = FILLER_DIR / "FORCE_CRASH"
+        while not _shutdown_requested:
+            if flag.exists():
+                try:
+                    flag.unlink()
+                except OSError:
+                    pass
+                # Log via stderr as a last resort — structured handlers may
+                # not flush before os._exit.
+                sys.stderr.write(
+                    '{"event":"forced_crash","message":"FORCE_CRASH — os._exit(1)"}\n'
+                )
+                sys.stderr.flush()
+                os._exit(1)
+            time.sleep(0.5)
+
+    threading.Thread(target=_watch, name="crash-watcher", daemon=True).start()
+
+
 def main() -> int:
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
+    start_crash_watcher()
 
     log_event(
         logging.INFO,
@@ -218,6 +247,28 @@ def main() -> int:
     consecutive_failures = 0
 
     while not _shutdown_requested:
+        # Day 3 crash-recovery test hook. Creating this file (on the mounted
+        # filler-pool volume) makes the controller exit with code 1, which is
+        # what Compose's restart:always is supposed to recover from.
+        #
+        # Why not `docker kill`? Docker treats kill/stop as a *manual* stop and
+        # deliberately ignores restart policies until the daemon restarts —
+        # see Docker docs "Start containers automatically". The Day 3 plan's
+        # `docker kill` check is therefore the wrong test for Compose restart.
+        crash_flag = FILLER_DIR / "FORCE_CRASH"
+        if crash_flag.exists():
+            try:
+                crash_flag.unlink()
+            except OSError:
+                pass
+            log_event(
+                logging.ERROR,
+                "forced_crash",
+                "FORCE_CRASH present — exiting with code 1 to exercise restart:always",
+            )
+            pool.close()
+            return 1
+
         track = pool.pick_and_mark_played()
 
         if track is None:
