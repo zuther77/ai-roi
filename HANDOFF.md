@@ -3,9 +3,10 @@
 For an agent or developer picking this project up cold. Read this first, then
 the two design documents in the section below.
 
-**Status as of 2026-09-22:** Days 1–2 complete and verified by the owner
-(including encoder pacing fixes after live YouTube health issues). Day 3
-implemented and pushed; **acceptance criteria not yet verified by the owner**.
+**Status as of 2026-09-22:** Days 1–3 implemented. Day 1–2 verified by the
+owner. Day 3 crash-recovery acceptance not yet owner-verified. **Option A
+gapless playout is implemented** (Sprint 1 bar: continuous RTMP with static
+image + changing audio; crash → brief no-data is an accepted trade-off).
 Day 4 not started.
 
 ---
@@ -106,11 +107,12 @@ filler-pool/
   audio/                 the track pool
   filler.db              SQLite, created automatically
   current_track.txt      now-playing file
+  playlist.ffconcat      Option A concat list (rewritten each session)
 playout/
   Dockerfile             python:3.12-slim + ffmpeg via apt
-  stream.sh              the FFmpeg invocation, one track per call
+  stream.sh              FFmpeg: gapless concat OR single-file
   filler_pool.py         SQLite store + pure pick_next_track()
-  playout_controller.py  the pick/play/repeat loop; container entrypoint
+  playout_controller.py  builds playlist, one long-lived FFmpeg, repeats
   test_filler_pool.py    9 stdlib unittest tests
 test-assets/
   README.md              committed; image.jpg and track.mp3 are gitignored
@@ -119,44 +121,33 @@ test-assets/
 ### How it runs
 
 `playout_controller.py` is the container's `CMD`. On start it reconciles
-`filler_tracks` against `filler-pool/audio/` (adding new files with durations
-measured by `ffprobe`, deleting rows for files that vanished), then loops:
-pick a track, write `current_track.txt`, invoke `stream.sh` for that one track,
-repeat. `stream.sh` owns all the FFmpeg flags and pushes to YouTube over RTMP.
+`filler_tracks` against `filler-pool/audio/`, builds a long ffconcat playlist
+(default ~6 hours / ≥20 tracks), writes `playlist.ffconcat`, and starts **one**
+FFmpeg via `stream.sh` with a continuous pre-scaled still image + concat audio.
+`current_track.txt` advances on a wall-clock schedule while FFmpeg runs. When
+the playlist is exhausted (or FFmpeg errors), the controller rebuilds and
+starts a new session.
 
 ### Design decisions made, and why
 
 - **`python:3.12-slim` over `debian:bookworm-slim`.** The plan offers either.
   Python was needed for Day 2's controller anyway.
-- **The stream key is read inside the container, not the host shell.** The
-  plan's Day 1 Task 5 shows `rtmp://.../live2/$YOUTUBE_STREAM_KEY` typed at the
-  host shell. That is broken: the host shell expands the variable before Docker
-  runs, and since the key lives in `.env` (read by the container) it expands to
-  an empty string and pushes to a keyless URL. The resulting error looks like a
-  bad key. This is why `stream.sh` exists.
+- **The stream key is read inside the container, not the host shell.** See
+  `stream.sh` comments — host-shell expansion of `$YOUTUBE_STREAM_KEY` is empty.
 - **Extra encoder flags beyond the plan's command.** 1280x720, 30fps, keyframe
-  every 2s, 2500kbps, 44.1kHz stereo. libx264 defaults to a keyframe every 250
-  frames (>8s), and YouTube requires ≤4s. Without these the stream is likely to
-  be rejected with exactly the vague error the plan's fourth Day 1 pitfall
-  warns about.
-- **`DRY_RUN=1`** encodes to null for a few seconds instead of pushing to
-  YouTube. Not in the plan; added so encoder changes can be tested without
-  consuming a live slot. `DRY_RUN_SECONDS` controls the duration.
-- **`-shortest` plus `STREAM_LOOP=0`.** The image input uses `-loop 1` and
-  never ends. Without `-shortest`, FFmpeg would keep streaming a silent still
-  picture after a track finished and never return control to the controller.
-- **`UNIQUE` on `filler_tracks.file_path`**, which the plan's schema omits.
-  Without it every restart re-inserts the same files and the pool accumulates
-  duplicates.
-- **Recent-play history is read from the database, not held in memory,** so the
-  no-repeat rule survives a restart. Day 3 is about restarting a lot.
-- **`mark_played()` fires when playback starts, not when it finishes.** If the
-  container dies mid-track the track still counts as played; otherwise a crash
-  loop would replay the same track forever.
-- **Selection is a pure function.** `pick_next_track(tracks, recent_ids, ...)`
-  takes plain data and returns a choice, with an injectable RNG for
-  reproducible tests. This is what makes Day 2's third acceptance criterion
-  real. Keep it that way — resist moving logic into the SQL.
+  every 2s, 2500kbps, 44.1kHz stereo. YouTube requires keyframes ≤4s.
+- **`DRY_RUN=1`** encodes to null for a few seconds. Controller exits after one
+  session when dry-running so smoke tests are finite.
+- **Option A gapless (concat playlist).** Restart-per-track caused YouTube
+  "No data" between every song. One FFmpeg owns RTMP for the whole playlist;
+  static image never drops. Session end / crash → brief no-data is accepted.
+- **Pre-scale still image once** to `/tmp/playout-image.jpg`, then
+  `-re -loop 1` — do not reintroduce filter-graph `loop=-1` without pacing.
+- **`UNIQUE` on `filler_tracks.file_path`.** Plan schema omits it; without it
+  every restart re-inserts duplicates.
+- **`mark_played()` when a track is queued into the playlist**, not when its
+  wall-clock slot ends — crash mid-session still advances history.
+- **Selection is a pure function.** Keep `pick_next_track(...)` that way.
 
 ---
 
@@ -169,9 +160,9 @@ Owner confirmed a live stream using their own track and image.
 Owner confirmed healthy streaming after encoder fixes. Do not reintroduce:
 
 1. Large still image re-decoded every frame → YouTube yellow. Fixed by
-   pre-scaling once per track to `/tmp/playout-image.jpg`.
+   pre-scaling once to `/tmp/playout-image.jpg`.
 2. Filter-graph `loop=-1` without pacing → ~62 Mbps flood → "No data". Fixed
-   by dropping that pattern; use paced demuxer on the pre-scaled JPEG.
+   by paced demuxer on the pre-scaled JPEG.
 3. Stream key can appear in `docker compose top` argv — prefer logs; rotate
    key if exposed.
 
@@ -182,32 +173,48 @@ Twelve royalty-free tracks in `filler-pool/audio/` (IDs 6–17).
 - `deploy/radio-stack.service` — Linux-only `docker compose up -d` boot trigger
 - JSON structured logs → stdout + `logs/playout.jsonl`
 - Corrupt/missing tracks → `track_skipped`, container stays up
-- `entrypoint.sh` 2s delay (Compose has no RestartSec)
+- `FORCE_CRASH` file (not `docker kill`) exercises Compose restart policy
 
-Owner must still verify: compose restart policy, `docker kill` recovery,
-corrupt-file skip live, and (Linux only) reboot persistence.
+### Gapless (Option A) — implemented, owner must verify live
+Dry-run in container succeeded (concat mode, ~1x realtime). Live check: one
+FFmpeg session should span multiple track changes with **no** YouTube
+"No data" between songs. Image stays up the whole time.
 
 ---
 
 ## 6. Known risks and open items
 
-**Restart-per-track vs design-spec FFmpeg supervisor.** Spec Section 3.8 assumes
-one long-lived FFmpeg. Day 2–3 restart FFmpeg every track. Exit code 0 is a
-normal track change — not a crash for Day 17 metrics. Gapless remains deferred.
+**Playlist session boundary.** When the ~6h playlist ends, FFmpeg exits and
+reconnects — a rare brief gap. Crash / empty pool → no data until recovery;
+accepted for Sprint 1.
 
 **Open questions** (design spec Section 10): #1 moderation (Day 11), #4 filler
 retention, #7 Gemini spend cap, `SAFETY_MARGIN_SEC` (Day 9, ~120s as config).
 
 ---
 
-## 7. Next step: Day 4
+## 7. Future work
 
-Sprint 2 — network + Redis job queue with DELL. Read `detailed-plan.md` Day 4.
-Needs physical Ethernet link between master and DELL.
+### Option B — FIFO / permanent FFmpeg (not started)
+
+Owner deferred. True infinite gapless without playlist rebuilds: keep one
+FFmpeg forever reading raw audio from a named pipe (or similar), while the
+controller writes decoded PCM for each next track into the FIFO. Static image
+input stays continuous; audio never ends so RTMP never reconnects on playlist
+exhaustion. More moving parts (pipe lifetime, backpressure, format lock).
+Do not start unless the owner asks; Option A is the Sprint 1 path.
 
 ---
 
-## 8. Practical reference
+## 8. Next step: Day 4
+
+Sprint 2 — network + Redis job queue with DELL. Read `detailed-plan.md` Day 4.
+Needs physical Ethernet link between master and DELL. Only after Sprint 1
+gapless is owner-verified live.
+
+---
+
+## 9. Practical reference
 
 ```sh
 cd /Users/zuths/Desktop/Vibe/ai-roi/ai-roi
@@ -217,10 +224,15 @@ docker compose up -d
 docker compose down
 docker compose logs -f playout
 docker compose run --rm --entrypoint "" playout python -m unittest -v
-docker compose run --rm --entrypoint "" playout bash
 
-# Day 3 crash test
-docker kill "$(docker compose ps -q playout)"
+# Gapless dry-run (finite; no YouTube)
+docker compose run --rm --entrypoint "" \
+  -e DRY_RUN=1 -e DRY_RUN_SECONDS=20 \
+  -e PLAYLIST_TARGET_SEC=600 -e PLAYLIST_MIN_TRACKS=5 \
+  playout python -u /app/playout_controller.py
+
+# Day 3 crash test (Compose restart:always)
+touch filler-pool/FORCE_CRASH
 docker compose ps
 tail -f logs/playout.jsonl
 ```
@@ -232,4 +244,3 @@ git log --all --full-history --oneline -- .env   # must be empty
 ```
 
 Prefer `docker compose logs` over `docker compose top` (argv can leak the key).
-

@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 #
-# Day 1: push one looping audio file over one static image to YouTube Live.
+# Push still-image video + audio to YouTube Live (or a dry-run null sink).
+#
+# Two audio modes:
+#
+#   PLAYLIST_FILE set  — Option A gapless: concat demuxer plays a pre-built
+#                        playlist while one long-lived FFmpeg keeps the RTMP
+#                        socket open. Static image never drops; only audio
+#                        advances between tracks. (Sprint 1 requirement.)
+#
+#   AUDIO_FILE set     — single-file mode (Day 1 smoke / legacy). STREAM_LOOP
+#                        controls whether the file repeats.
 #
 # WHY THIS IS A SCRIPT INSTEAD OF A COMMAND YOU TYPE
 # --------------------------------------------------
@@ -13,40 +23,20 @@
 # ever invoked. The key lives in .env, which is read by the *container*, not
 # exported into your shell — so your shell expands it to an empty string and
 # FFmpeg pushes to "rtmp://a.rtmp.youtube.com/live2/" with no key on the end.
-# The resulting connection error looks like a bad key or a network fault.
-#
 # Reading the variable in here means it comes from the container's own
 # environment, which is what `env_file: .env` actually populates.
 
 set -euo pipefail
-#   -e            stop immediately if any command fails
-#   -u            treat reading an unset variable as an error
-#   -o pipefail   a failure anywhere in a pipeline fails the whole pipeline
-# Together these turn a misconfiguration into an immediate, loud crash instead
-# of a half-working stream that is harder to diagnose.
 
 
 # ---------------------------------------------------------------------------
 # 1. Required configuration (from .env, via docker-compose's env_file)
 # ---------------------------------------------------------------------------
-# The ${VAR:?message} form aborts with that message if VAR is unset or empty.
-# The key's value is never printed by this script — only whether it exists — so
-# it cannot leak into `docker compose logs`.
-
 : "${YOUTUBE_RTMP_URL:?not set. Copy .env.example to .env and fill it in.}"
 
-# DRY_RUN=1 encodes to nowhere instead of pushing to YouTube. This exists so
-# encoder and filter changes can be checked without consuming a live stream
-# slot or briefly appearing on the channel — and so a fresh clone with no
-# stream key can still verify the pipeline runs.
-#
-# Not part of the plan's Day 1 tasks; added because "does FFmpeg accept these
-# arguments" and "does YouTube accept this stream" are worth failing
-# separately rather than debugging as one combined step.
+# DRY_RUN=1 encodes to nowhere instead of pushing to YouTube.
 DRY_RUN="${DRY_RUN:-0}"
 
-# Only a real broadcast needs the key, so this check lives behind the dry-run
-# branch.
 if [[ "$DRY_RUN" != "1" ]]; then
     : "${YOUTUBE_STREAM_KEY:?not set. Get it from YouTube Studio > Create > Go Live > Stream settings.}"
 fi
@@ -55,22 +45,23 @@ fi
 # ---------------------------------------------------------------------------
 # 2. Input files
 # ---------------------------------------------------------------------------
-# These are paths inside the container. docker-compose.yml mounts the host's
-# ./test-assets directory at /app/test-assets, so dropping a file into the repo
-# makes it visible here with no image rebuild.
-#
-# Lowercase, hyphenated names are used throughout (test-assets, not
-# Test-Assets). macOS filesystems are case-insensitive by default while Linux
-# filesystems are case-sensitive, so a capitalisation typo silently works on
-# your Mac and then breaks in production. One flat convention avoids that.
-
+# Gapless (Option A): PLAYLIST_FILE is an ffconcat list written by the
+# controller. Single-file: AUDIO_FILE is one mp3.
+PLAYLIST_FILE="${PLAYLIST_FILE:-}"
 AUDIO_FILE="${AUDIO_FILE:-/app/test-assets/track.mp3}"
 IMAGE_FILE="${IMAGE_FILE:-/app/test-assets/image.jpg}"
 
-if [[ ! -f "$AUDIO_FILE" ]]; then
-    echo "ERROR: no audio file at ${AUDIO_FILE}" >&2
-    echo "       Put a track at test-assets/track.mp3 (see test-assets/README.md)." >&2
-    exit 1
+if [[ -n "$PLAYLIST_FILE" ]]; then
+    if [[ ! -f "$PLAYLIST_FILE" ]]; then
+        echo "ERROR: no concat playlist at ${PLAYLIST_FILE}" >&2
+        exit 1
+    fi
+else
+    if [[ ! -f "$AUDIO_FILE" ]]; then
+        echo "ERROR: no audio file at ${AUDIO_FILE}" >&2
+        echo "       Put a track at test-assets/track.mp3 (see test-assets/README.md)." >&2
+        exit 1
+    fi
 fi
 
 if [[ ! -f "$IMAGE_FILE" ]]; then
@@ -83,16 +74,11 @@ fi
 # ---------------------------------------------------------------------------
 # 3. Encoding settings
 # ---------------------------------------------------------------------------
-# All overridable from .env later without editing this file. Bitrates are bare
-# numbers in kbps so the buffer size can be derived arithmetically below.
-
-# How many times FFmpeg should repeat the audio file itself.
+# How many times FFmpeg should repeat a *single* AUDIO_FILE.
+# Ignored in playlist (gapless) mode.
 #
-#    0  play it once and exit  — the Day 2 default. playout_controller.py
-#       drives the rotation, so FFmpeg must hand control back when a track
-#       ends rather than looping internally.
-#   -1  repeat forever — Day 1's behaviour, still available for a quick
-#       single-file test with `docker compose run`.
+#    0  play once and exit
+#   -1  repeat forever (Day 1 single-file smoke)
 STREAM_LOOP="${STREAM_LOOP:-0}"
 
 VIDEO_WIDTH="${VIDEO_WIDTH:-1280}"
@@ -101,44 +87,18 @@ FRAMERATE="${FRAMERATE:-30}"
 VIDEO_BITRATE_KBPS="${VIDEO_BITRATE_KBPS:-2500}"
 AUDIO_BITRATE_KBPS="${AUDIO_BITRATE_KBPS:-128}"
 
-# Keyframe interval. YouTube requires a keyframe at least every 4 seconds and
-# recommends every 2. libx264 defaults to one every 250 frames — over 8 seconds
-# at 30fps — which YouTube flags as a misconfigured stream and may reject.
-# GOP = framerate x 2 gives the recommended 2-second interval.
-#
-# This is the "minimum bitrate/resolution" pitfall the plan warns about. If the
-# stream refuses to start, this block is the first place to look.
+# Keyframe interval. YouTube requires ≤4s; recommend 2s.
 GOP=$(( FRAMERATE * 2 ))
 
-# Stripping a trailing slash means either "rtmp://.../live2" or
-# "rtmp://.../live2/" in .env produces a valid target.
-# ${VAR:-} supplies an empty default so this line does not trip `set -u` during
-# a dry run, where the key is intentionally absent.
 RTMP_TARGET="${YOUTUBE_RTMP_URL%/}/${YOUTUBE_STREAM_KEY:-}"
 
 
 # ---------------------------------------------------------------------------
 # 3b. Pre-scale the still image once
 # ---------------------------------------------------------------------------
-# Why this exists: two live failures taught us not to trust either of the
-# naive approaches.
-#
-# 1. Feeding a large source JPEG with `-loop 1 -framerate 30` re-decodes and
-#    re-scales it on every frame. A 5712x3213 photo dropped encoding to 1.2x
-#    realtime and YouTube went yellow ("not receiving enough video").
-#
-# 2. Decoding once and repeating with the `loop` filter fixes the CPU cost,
-#    but `loop=-1` has no natural rate limit. Without careful pacing it raced
-#    ahead of the audio and pushed ~62Mbps (1.18GB in 152s) instead of ~2.5Mbps.
-#    YouTube then reported "not currently receiving data". Adding the
-#    `realtime` filter stopped the flood but ran every track ~7% slow.
-#
-# The durable fix is what you suggested: scale the image to the stream size
-# once, write that small JPEG, then feed *that* with a normal paced demuxer
-# loop (`-re -loop 1 -framerate ${FRAMERATE}`). Scaling happens once per
-# track start (milliseconds). Frame pacing comes from `-re` on a real input,
-# not from a generated filter stream. Measured: 30s of content in 30s wall,
-# ~2Mbps out.
+# Large source JPEGs re-decoded every frame → YouTube yellow.
+# Filter-graph loop=-1 without pacing → Mbps flood → "No data".
+# Fix: scale once, then paced demuxer loop on the small JPEG.
 PRESCALED_IMAGE="/tmp/playout-image.jpg"
 ffmpeg -hide_banner -loglevel error \
     -i "$IMAGE_FILE" \
@@ -149,93 +109,66 @@ ffmpeg -hide_banner -loglevel error \
 # ---------------------------------------------------------------------------
 # 4. Build the FFmpeg argument list
 # ---------------------------------------------------------------------------
-# Assembled as an array rather than one long backslash-continued line so that
-# each flag can carry a comment explaining why it is here.
-
 FFMPEG_ARGS=(
     -hide_banner
-    # Quiet the per-frame spam but keep the periodic progress line, which is
-    # how you confirm the stream is still alive in `docker compose logs`.
     -loglevel warning
     -stats
 
-    # --- Input 0: the pre-scaled still image --------------------------------
-    # -loop 1 / -framerate / -re are safe here because the file is already
-    # 1280x720. Re-decoding a 100KB JPEG thirty times a second is cheap;
-    # re-decoding a 5.7K photo was not. -re is what keeps video in lockstep
-    # with wall clock — there is no filter-graph `loop` generating frames.
+    # --- Input 0: pre-scaled still image (continuous for the whole session) -
     -re -loop 1 -framerate "$FRAMERATE" -i "$PRESCALED_IMAGE"
+)
 
-    # --- Input 1: the audio track ------------------------------------------
-    # -stream_loop controls repetition of this input. On Day 1 it was hardcoded
-    #     to -1 (forever), which was the plan's first listed pitfall: without
-    #     it FFmpeg played the track once and then streamed silence over a
-    #     still image, which presents as a network fault when it is nothing of
-    #     the sort. Day 2 sets it to 0 so the controller can advance to the
-    #     next track, and the silence problem is now prevented by -shortest
-    #     below instead.
-    #     It must appear BEFORE -i; as an output option it is silently ignored.
-    # -re reads at the file's real playback speed instead of as fast as the
-    #     disk allows. Live output needs wall-clock pacing, otherwise FFmpeg
-    #     races ahead of real time and YouTube drops the connection.
-    -re -stream_loop "$STREAM_LOOP" -i "$AUDIO_FILE"
+if [[ -n "$PLAYLIST_FILE" ]]; then
+    # --- Input 1: concat playlist (Option A gapless) ------------------------
+    # One FFmpeg process owns the RTMP socket for the whole playlist. Tracks
+    # advance inside the concat demuxer — no reconnect between songs.
+    # -re paces audio to wall clock so we do not race ahead of YouTube.
+    FFMPEG_ARGS+=(
+        -re -f concat -safe 0 -i "$PLAYLIST_FILE"
+    )
+else
+    # --- Input 1: single audio file ----------------------------------------
+    FFMPEG_ARGS+=(
+        -re -stream_loop "$STREAM_LOOP" -i "$AUDIO_FILE"
+    )
+fi
 
-    # State explicitly which stream comes from which input rather than relying
-    # on FFmpeg's automatic stream selection.
+FFMPEG_ARGS+=(
     -map 0:v:0
     -map 1:a:0
 
-    # No -vf here. Scaling already happened in the pre-scale step above.
-
     # --- Video encoding -----------------------------------------------------
-    # libx264 on the CPU, not NVENC. Design spec Section 6 reserves the GPU for
-    # music generation, so the encoder has to stay off it.
     -c:v libx264
     -preset veryfast
-    # Tells x264 the picture barely changes between frames.
     -tune stillimage
-    # The only chroma subsampling browsers decode reliably.
     -pix_fmt yuv420p
     -r "$FRAMERATE"
     -g "$GOP"
     -keyint_min "$GOP"
-    # Disables scene-change keyframes so the interval stays exactly at GOP,
-    # which is the number YouTube actually inspects.
     -sc_threshold 0
     -b:v "${VIDEO_BITRATE_KBPS}k"
     -maxrate "${VIDEO_BITRATE_KBPS}k"
     -bufsize "$(( VIDEO_BITRATE_KBPS * 2 ))k"
 
     # --- Audio encoding -----------------------------------------------------
-    # 44.1kHz stereo AAC is what YouTube expects. Resampling here means a
-    # source file at any other rate still yields a valid stream.
+    # Resample here so a 48k pool file next to 44.1k files still encodes cleanly
+    # after the concat demuxer hands packets across.
     -c:a aac
     -b:a "${AUDIO_BITRATE_KBPS}k"
     -ar 44100
     -ac 2
 )
 
-# -shortest ends the output when the shortest input runs out.
-#
-# This is essential once STREAM_LOOP is finite. The image input uses -loop 1,
-# so it never ends on its own; without -shortest, FFmpeg would keep streaming
-# a still picture in silence after the track finished and never hand control
-# back to the controller. When STREAM_LOOP is -1 both inputs are infinite and
-# the flag is pointless, so it is only added when it does something.
-if [[ "$STREAM_LOOP" != "-1" ]]; then
+# -shortest: image loops forever; end when audio (playlist or single file) ends.
+# Always needed in playlist mode. In single-file mode, only when STREAM_LOOP
+# is finite (same as Day 1–2).
+if [[ -n "$PLAYLIST_FILE" || "$STREAM_LOOP" != "-1" ]]; then
     FFMPEG_ARGS+=( -shortest )
 fi
 
-# The destination is appended last, and depends on whether this is a real
-# broadcast or a dry run.
 if [[ "$DRY_RUN" == "1" ]]; then
-    # -t stops after a fixed number of seconds (the inputs loop forever, so
-    # without this it would never exit). -f null discards the encoded output
-    # while still running every filter and both encoders, so any argument
-    # error or bad filter graph still surfaces.
     FFMPEG_ARGS+=( -t "${DRY_RUN_SECONDS:-5}" -f null - )
 else
-    # FLV is the container format RTMP requires.
     FFMPEG_ARGS+=( -f flv "$RTMP_TARGET" )
 fi
 
@@ -243,10 +176,13 @@ fi
 # ---------------------------------------------------------------------------
 # 5. Go
 # ---------------------------------------------------------------------------
-# Log the configuration, but print only the RTMP base — never the assembled
-# target, because that string ends in the stream key and these lines are
-# visible to anyone who runs `docker compose logs`.
-echo "playout: audio  ${AUDIO_FILE} (stream_loop=${STREAM_LOOP})"
+if [[ -n "$PLAYLIST_FILE" ]]; then
+    echo "playout: mode   gapless concat (Option A)"
+    echo "playout: audio  playlist ${PLAYLIST_FILE}"
+else
+    echo "playout: mode   single-file"
+    echo "playout: audio  ${AUDIO_FILE} (stream_loop=${STREAM_LOOP})"
+fi
 echo "playout: image  ${IMAGE_FILE}"
 echo "playout: video  ${VIDEO_WIDTH}x${VIDEO_HEIGHT} @ ${FRAMERATE}fps (image pre-scaled once), keyframe every $(( GOP / FRAMERATE ))s, ${VIDEO_BITRATE_KBPS}kbps"
 
@@ -256,12 +192,5 @@ else
     echo "playout: target ${YOUTUBE_RTMP_URL%/}/<stream-key-hidden>"
 fi
 
-# `exec` replaces this shell with FFmpeg rather than spawning it as a child.
-# On Day 1 that made FFmpeg PID 1, receiving Docker's stop signal directly.
-# Since Day 2 the controller is PID 1 and this script is its child, but exec
-# still matters: it removes a pointless bash process from the middle of the
-# signal path, so a stop reaches FFmpeg itself rather than a shell that would
-# ignore it and let FFmpeg be force-killed on timeout. That is the difference
-# between the YouTube stream ending cleanly and hanging until YouTube times
-# it out.
+# `exec` replaces this shell with FFmpeg so stop signals reach the encoder.
 exec ffmpeg "${FFMPEG_ARGS[@]}"
