@@ -36,6 +36,22 @@ docker compose run --rm -v "$(pwd)/test-assets:/out" playout \
   ffmpeg -f lavfi -i "color=c=0x0f1419:s=1280x720" -frames:v 1 -y /out/image.jpg
 ```
 
+## A note on image size
+
+Any resolution works. `stream.sh` scales and pads your image to 1280x720
+**once** at the start of each track, then streams that small JPEG. A 5.7K
+photo is fine; the expensive work no longer runs every frame.
+
+That design exists because two earlier approaches failed live:
+
+1. Re-decoding a large JPEG every frame starved the encoder (YouTube yellow:
+   "not receiving enough video").
+2. Generating frames with a filter `loop` raced ahead of audio and flooded
+   the upload (~62Mbps), after which YouTube reported no data.
+
+Do not reintroduce either pattern without measuring wall-clock time and
+upload bitrate against a full track.
+
 ## Using real audio instead
 
 Placeholders are fine for confirming that frames reach YouTube, but "audio is

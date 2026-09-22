@@ -118,6 +118,35 @@ RTMP_TARGET="${YOUTUBE_RTMP_URL%/}/${YOUTUBE_STREAM_KEY:-}"
 
 
 # ---------------------------------------------------------------------------
+# 3b. Pre-scale the still image once
+# ---------------------------------------------------------------------------
+# Why this exists: two live failures taught us not to trust either of the
+# naive approaches.
+#
+# 1. Feeding a large source JPEG with `-loop 1 -framerate 30` re-decodes and
+#    re-scales it on every frame. A 5712x3213 photo dropped encoding to 1.2x
+#    realtime and YouTube went yellow ("not receiving enough video").
+#
+# 2. Decoding once and repeating with the `loop` filter fixes the CPU cost,
+#    but `loop=-1` has no natural rate limit. Without careful pacing it raced
+#    ahead of the audio and pushed ~62Mbps (1.18GB in 152s) instead of ~2.5Mbps.
+#    YouTube then reported "not currently receiving data". Adding the
+#    `realtime` filter stopped the flood but ran every track ~7% slow.
+#
+# The durable fix is what you suggested: scale the image to the stream size
+# once, write that small JPEG, then feed *that* with a normal paced demuxer
+# loop (`-re -loop 1 -framerate ${FRAMERATE}`). Scaling happens once per
+# track start (milliseconds). Frame pacing comes from `-re` on a real input,
+# not from a generated filter stream. Measured: 30s of content in 30s wall,
+# ~2Mbps out.
+PRESCALED_IMAGE="/tmp/playout-image.jpg"
+ffmpeg -hide_banner -loglevel error \
+    -i "$IMAGE_FILE" \
+    -vf "scale=${VIDEO_WIDTH}:${VIDEO_HEIGHT}:force_original_aspect_ratio=decrease,pad=${VIDEO_WIDTH}:${VIDEO_HEIGHT}:(ow-iw)/2:(oh-ih)/2" \
+    -frames:v 1 -y "$PRESCALED_IMAGE"
+
+
+# ---------------------------------------------------------------------------
 # 4. Build the FFmpeg argument list
 # ---------------------------------------------------------------------------
 # Assembled as an array rather than one long backslash-continued line so that
@@ -130,13 +159,12 @@ FFMPEG_ARGS=(
     -loglevel warning
     -stats
 
-    # --- Input 0: the still image -----------------------------------------
-    # -loop 1      feed the same picture forever instead of ending after one
-    #              frame
-    # -framerate   how fast those duplicate frames are produced; matching the
-    #              output rate avoids a pointless frame-rate conversion
-    # -re          read at real-time speed (see the note on the audio input)
-    -re -loop 1 -framerate "$FRAMERATE" -i "$IMAGE_FILE"
+    # --- Input 0: the pre-scaled still image --------------------------------
+    # -loop 1 / -framerate / -re are safe here because the file is already
+    # 1280x720. Re-decoding a 100KB JPEG thirty times a second is cheap;
+    # re-decoding a 5.7K photo was not. -re is what keeps video in lockstep
+    # with wall clock — there is no filter-graph `loop` generating frames.
+    -re -loop 1 -framerate "$FRAMERATE" -i "$PRESCALED_IMAGE"
 
     # --- Input 1: the audio track ------------------------------------------
     # -stream_loop controls repetition of this input. On Day 1 it was hardcoded
@@ -157,9 +185,7 @@ FFMPEG_ARGS=(
     -map 0:v:0
     -map 1:a:0
 
-    # Fit the image to the target size without distorting it, then pad the
-    # leftover space with black. Lets any aspect ratio be dropped in.
-    -vf "scale=${VIDEO_WIDTH}:${VIDEO_HEIGHT}:force_original_aspect_ratio=decrease,pad=${VIDEO_WIDTH}:${VIDEO_HEIGHT}:(ow-iw)/2:(oh-ih)/2"
+    # No -vf here. Scaling already happened in the pre-scale step above.
 
     # --- Video encoding -----------------------------------------------------
     # libx264 on the CPU, not NVENC. Design spec Section 6 reserves the GPU for
@@ -222,7 +248,7 @@ fi
 # visible to anyone who runs `docker compose logs`.
 echo "playout: audio  ${AUDIO_FILE} (stream_loop=${STREAM_LOOP})"
 echo "playout: image  ${IMAGE_FILE}"
-echo "playout: video  ${VIDEO_WIDTH}x${VIDEO_HEIGHT} @ ${FRAMERATE}fps, keyframe every $(( GOP / FRAMERATE ))s, ${VIDEO_BITRATE_KBPS}kbps"
+echo "playout: video  ${VIDEO_WIDTH}x${VIDEO_HEIGHT} @ ${FRAMERATE}fps (image pre-scaled once), keyframe every $(( GOP / FRAMERATE ))s, ${VIDEO_BITRATE_KBPS}kbps"
 
 if [[ "$DRY_RUN" == "1" ]]; then
     echo "playout: DRY RUN — encoding ${DRY_RUN_SECONDS:-5}s to nowhere, YouTube will not be contacted"

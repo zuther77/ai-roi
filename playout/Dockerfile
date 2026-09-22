@@ -26,6 +26,15 @@ RUN apt-get update \
 
 WORKDIR /app
 
+# Flush print/logging output immediately instead of buffering it.
+#
+# Python buffers stdout when it is not attached to a terminal, which is always
+# the case under Docker. Without this, `docker compose logs` lagged minutes
+# behind reality — during one debugging session the log showed the container
+# still on its first track while the process list proved it had moved on
+# twice. Logs you cannot trust are worse than no logs.
+ENV PYTHONUNBUFFERED=1
+
 # Copied as its own step so that editing these only rebuilds this tiny layer,
 # not the (slow) apt layer above it.
 #
