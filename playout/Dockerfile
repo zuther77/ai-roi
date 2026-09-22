@@ -42,18 +42,13 @@ ENV PYTHONUNBUFFERED=1
 # only the Python standard library (sqlite3, subprocess, dataclasses), so the
 # image needs nothing beyond what python:3.12-slim already ships. Tests run on
 # stdlib unittest for the same reason.
-COPY stream.sh /app/stream.sh
+COPY stream.sh entrypoint.sh /app/
 COPY filler_pool.py playout_controller.py test_filler_pool.py /app/
-RUN chmod +x /app/stream.sh
+RUN chmod +x /app/stream.sh /app/entrypoint.sh
 
-# CMD rather than ENTRYPOINT, deliberately. CMD is the default action but stays
-# overridable, so ad-hoc debugging still works:
-#     docker compose run playout ffmpeg -version
-#     docker compose run playout python -m unittest discover -s /app
-#     docker compose run playout bash
-# An ENTRYPOINT would swallow those arguments and feed them to the controller.
-#
-# Day 1 ran stream.sh directly, which looped a single file forever. Day 2 puts
-# the controller in front: it decides which track plays and calls stream.sh
-# once per track.
-CMD ["python", "/app/playout_controller.py"]
+# ENTRYPOINT is the Day 3 crash-loop backoff shell. CMD stays overridable so
+# ad-hoc debugging still works:
+#     docker compose run --entrypoint "" playout ffmpeg -version
+#     docker compose run --entrypoint "" playout python -m unittest -v
+#     docker compose run --entrypoint "" playout bash
+ENTRYPOINT ["/app/entrypoint.sh"]

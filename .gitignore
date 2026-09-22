@@ -28,7 +28,9 @@ filler-pool/*
 # fresh clone knows what belongs here.
 test-assets/*
 !test-assets/README.md
-logs/
+# Host-visible structured logs (Day 3). Keep the README; ignore runtime files.
+logs/*
+!logs/README.md
 *.log
 
 # OS cruft

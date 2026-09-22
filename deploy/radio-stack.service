@@ -1,0 +1,33 @@
+# AI Music Radio — boot trigger for the Linux production box ONLY.
+#
+# This is the single OS-specific file in the whole project (design spec
+# Section 1.5 / Day 3). Its entire job is `docker compose up -d`. If you find
+# yourself putting application logic here, that logic belongs in Compose or
+# inside a container instead — so it also works on the macOS dev machine.
+#
+# Install (on the Linux master, after the repo lives at WorkingDirectory):
+#
+#   sudo cp deploy/radio-stack.service /etc/systemd/system/
+#   # Edit WorkingDirectory= below if the checkout is not /opt/radio
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now radio-stack.service
+#
+# This unit is NOT used on macOS. Dev machines bring the stack up with
+# `docker compose up -d` manually (or leave Docker Desktop to restart
+# containers that already have restart: always). That asymmetry is expected.
+
+[Unit]
+Description=AI Music Radio (Docker Compose stack)
+Requires=docker.service
+After=docker.service network-online.target
+
+[Service]
+# Change this to wherever the repo lives on the production box.
+WorkingDirectory=/opt/radio
+ExecStart=/usr/bin/docker compose up -d
+ExecStop=/usr/bin/docker compose down
+Type=oneshot
+RemainAfterExit=true
+
+[Install]
+WantedBy=multi-user.target

@@ -17,88 +17,158 @@ optimise "if it's actually noticeable".
 
 The cost, which is worth being explicit about: FFmpeg owns the RTMP socket, so
 restarting it disconnects and reconnects to YouTube between every track. Short
-reconnects are tolerated, but YouTube's stream health will notice them. If the
-2-hour acceptance run shows this as a real problem, the fix is the gapless
-approach, not a tweak to this file.
+reconnects are tolerated, but YouTube's stream health will notice them.
+
+Day 3 note: a clean FFmpeg exit (code 0) is a *normal track change*, not a
+crash. Container-level ``restart: always`` recovers from process death; it is
+not the design-spec's long-lived FFmpeg supervisor (Section 3.8). Do not treat
+every FFmpeg exit as a failure event in metrics later (Day 17).
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import signal
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from filler_pool import FillerPool
-
-# Plain stdout logging. Docker captures it, so `docker compose logs` shows it
-# on both macOS and Linux with no configuration. Day 3 replaces this with
-# proper structured logging.
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
-    stream=sys.stdout,
-)
-log = logging.getLogger("playout")
 
 # Paths inside the container. docker-compose.yml maps ./filler-pool here.
 FILLER_DIR = Path(os.environ.get("FILLER_DIR", "/app/filler-pool"))
 AUDIO_DIR = FILLER_DIR / "audio"
 DB_PATH = Path(os.environ.get("FILLER_DB", str(FILLER_DIR / "filler.db")))
 NOW_PLAYING_FILE = Path(os.environ.get("NOW_PLAYING_FILE", str(FILLER_DIR / "current_track.txt")))
+LOG_DIR = Path(os.environ.get("LOG_DIR", "/app/logs"))
+LOG_FILE = LOG_DIR / "playout.jsonl"
 
 STREAM_SCRIPT = Path("/app/stream.sh")
 
 # How long to wait before retrying when the pool is empty. Without this the
 # loop would spin at 100% CPU against an empty directory.
-EMPTY_POOL_RETRY_SEC = 15
+EMPTY_POOL_RETRY_SEC = int(os.environ.get("EMPTY_POOL_RETRY_SEC", "15"))
+
+# Brief pause after a failed/corrupt track so a bad file cannot spin the loop
+# at full speed (and so restart: always + crash-loop stays survivable).
+BAD_TRACK_BACKOFF_SEC = float(os.environ.get("BAD_TRACK_BACKOFF_SEC", "2"))
 
 # Set by the signal handler so the loop can finish cleanly instead of being
 # killed mid-iteration.
 _shutdown_requested = False
 
 
+class JsonLineFormatter(logging.Formatter):
+    """One JSON object per line — readable by humans and by Day 17 tooling."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        # Extra fields attached via log_event() land on the record.
+        for key in ("event", "track_id", "track", "exit_code", "elapsed_sec",
+                    "play_count", "duration_sec", "reason", "signal"):
+            if hasattr(record, key):
+                payload[key] = getattr(record, key)
+        if record.exc_info:
+            payload["exc_info"] = self.formatException(record.exc_info)
+        return json.dumps(payload, default=str)
+
+
+def setup_logging() -> logging.Logger:
+    """Log structured JSON to stdout (compose logs) and a mounted file."""
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    logger = logging.getLogger("playout")
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+    logger.propagate = False
+
+    formatter = JsonLineFormatter()
+
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    stdout_handler.setFormatter(formatter)
+    logger.addHandler(stdout_handler)
+
+    # Rotate so a long soak test cannot fill the disk with JSON.
+    file_handler = RotatingFileHandler(
+        LOG_FILE, maxBytes=5_000_000, backupCount=3, encoding="utf-8",
+    )
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    return logger
+
+
+log = setup_logging()
+
+
+def log_event(level: int, event: str, message: str, **fields) -> None:
+    """Emit a structured log line with an explicit event name."""
+    log.log(level, message, extra={"event": event, **fields})
+
+
 def _handle_signal(signum, _frame):
     """Stop after the current track rather than dying instantly.
 
     Docker sends SIGTERM on `docker compose down`. FFmpeg is a child process
-    here (not PID 1 as it was on Day 1), so it receives its own signal and
-    exits; this flag stops us from immediately starting the next track.
+    here (not PID 1), so it receives its own signal and exits; this flag stops
+    us from immediately starting the next track.
     """
     global _shutdown_requested
     _shutdown_requested = True
-    log.info("received %s, will stop after the current track", signal.Signals(signum).name)
+    log_event(
+        logging.INFO,
+        "shutdown_requested",
+        f"received {signal.Signals(signum).name}, will stop after current track",
+        signal=signal.Signals(signum).name,
+    )
 
 
 def write_now_playing(track_path: str) -> None:
     """Record the current track where other processes can read it.
 
-    Task 3 of the plan asks for this file. With restart-per-track FFmpeg is
-    handed the path directly as an environment variable, so this file is
-    currently informational rather than load-bearing — but it's the natural
-    source for the Day 17 status dashboard, and it's how you can tell what is
-    playing without reading the logs.
-
     Written to a temp name and renamed, because rename is atomic on POSIX
     filesystems: a reader either sees the old path or the new one, never a
-    half-written line. This is the same pattern the design spec mandates for
-    generated audio on NFS (Section 3.5), applied early where it's cheap.
+    half-written line. Same pattern as design-spec atomic NFS writes.
     """
     tmp = NOW_PLAYING_FILE.with_suffix(".tmp")
     tmp.write_text(track_path + "\n", encoding="utf-8")
     tmp.replace(NOW_PLAYING_FILE)
 
 
+def track_is_playable(path: str) -> tuple[bool, str]:
+    """Return (ok, reason). Used to skip corrupt/missing files without dying.
+
+    Day 3 acceptance: a deliberately corrupted filler file is skipped and
+    logged rather than taking down the container.
+    """
+    p = Path(path)
+    if not p.is_file():
+        return False, "missing"
+    if p.stat().st_size == 0:
+        return False, "zero_byte"
+    # Cheap sanity check: ffprobe must still see a duration. Catches truncated
+    # or renamed-but-corrupt mp3s that survived an earlier sync.
+    from filler_pool import probe_duration_sec
+    if probe_duration_sec(path) is None:
+        return False, "unreadable"
+    return True, "ok"
+
+
 def play_once(track_path: str) -> int:
     """Run stream.sh for exactly one track. Returns FFmpeg's exit code.
 
     The track path is passed through the environment rather than interpolated
-    into a shell string. That's not stylistic: design spec edge case #7
-    requires prompt and file data never be spliced into an executed command,
-    and establishing the habit here costs nothing.
+    into a shell string (design spec edge case #7).
     """
     env = {
         **os.environ,
@@ -116,43 +186,78 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
 
-    log.info("filler pool directory: %s", AUDIO_DIR)
-    log.info("database: %s", DB_PATH)
+    log_event(
+        logging.INFO,
+        "container_start",
+        "playout controller starting",
+        track=str(AUDIO_DIR),
+    )
+    log_event(logging.INFO, "config", f"database={DB_PATH} log_file={LOG_FILE}")
 
     pool = FillerPool(db_path=DB_PATH, audio_dir=AUDIO_DIR)
 
     # Reconcile the table with the directory at startup, so adding or
     # removing a file and restarting is all that's needed to change the pool.
+    # Corrupt/unreadable files are skipped here (no row inserted).
     added, removed = pool.sync_from_disk()
     tracks = pool.all_tracks()
-    log.info("pool synced: %d added, %d removed, %d total", added, removed, len(tracks))
+    log_event(
+        logging.INFO,
+        "pool_synced",
+        f"pool synced: {added} added, {removed} removed, {len(tracks)} total",
+        play_count=len(tracks),
+    )
 
     if len(tracks) < 5:
-        # Not fatal — the loop works with any pool size — but the no-repeat
-        # acceptance criterion is specified for pools of 5 or more.
-        log.warning(
-            "pool has %d track(s); Day 2's acceptance criteria assume at least 5",
-            len(tracks),
+        log_event(
+            logging.WARNING,
+            "pool_small",
+            f"pool has {len(tracks)} track(s); Day 2 criteria assume at least 5",
         )
+
+    consecutive_failures = 0
 
     while not _shutdown_requested:
         track = pool.pick_and_mark_played()
 
         if track is None:
-            log.warning(
-                "no tracks in %s — put audio files there. Retrying in %ds.",
-                AUDIO_DIR, EMPTY_POOL_RETRY_SEC,
+            log_event(
+                logging.WARNING,
+                "pool_empty",
+                f"no tracks in {AUDIO_DIR} — retrying in {EMPTY_POOL_RETRY_SEC}s",
             )
             time.sleep(EMPTY_POOL_RETRY_SEC)
-            # Re-scan in case files appeared while we waited, so recovery
-            # doesn't require a restart.
             pool.sync_from_disk()
             continue
 
-        duration = f"{track.duration_sec:.0f}s" if track.duration_sec else "unknown"
-        log.info(
-            "playing id=%d %s (%s, play #%d)",
-            track.id, Path(track.file_path).name, duration, track.play_count + 1,
+        name = Path(track.file_path).name
+        ok, reason = track_is_playable(track.file_path)
+        if not ok:
+            consecutive_failures += 1
+            log_event(
+                logging.ERROR,
+                "track_skipped",
+                f"skipping {name}: {reason}",
+                track_id=track.id,
+                track=name,
+                reason=reason,
+            )
+            time.sleep(BAD_TRACK_BACKOFF_SEC)
+            # Re-sync so a deleted corrupt file drops out of the DB; a
+            # zero-byte file that is replaced with a good one gets re-added.
+            if reason == "missing":
+                pool.sync_from_disk()
+            continue
+
+        duration = track.duration_sec
+        log_event(
+            logging.INFO,
+            "track_start",
+            f"playing id={track.id} {name}",
+            track_id=track.id,
+            track=name,
+            duration_sec=duration,
+            play_count=track.play_count + 1,
         )
         write_now_playing(track.file_path)
 
@@ -161,17 +266,45 @@ def main() -> int:
         elapsed = time.monotonic() - started
 
         if code == 0:
-            log.info("finished %s after %.0fs", Path(track.file_path).name, elapsed)
-        else:
-            # Don't abort the whole station because one track failed. Day 3
-            # hardens this properly (skip and log corrupt files); today it at
-            # least keeps the rotation moving instead of exiting.
-            log.error(
-                "ffmpeg exited %d after %.0fs on %s; moving to the next track",
-                code, elapsed, Path(track.file_path).name,
+            consecutive_failures = 0
+            # Clean exit = normal end of track under restart-per-track, NOT a
+            # crash. Day 17 "reconnect count" must not treat these as failures.
+            log_event(
+                logging.INFO,
+                "track_end",
+                f"finished {name} after {elapsed:.0f}s",
+                track_id=track.id,
+                track=name,
+                exit_code=code,
+                elapsed_sec=round(elapsed, 2),
             )
+        else:
+            consecutive_failures += 1
+            log_event(
+                logging.ERROR,
+                "ffmpeg_error",
+                f"ffmpeg exited {code} after {elapsed:.0f}s on {name}; skipping",
+                track_id=track.id,
+                track=name,
+                exit_code=code,
+                elapsed_sec=round(elapsed, 2),
+                reason="ffmpeg_nonzero_exit",
+            )
+            time.sleep(BAD_TRACK_BACKOFF_SEC)
 
-    log.info("shutting down")
+        # If every recent attempt failed, pause harder so restart:always does
+        # not combine with a hot failure loop to thrash CPU.
+        if consecutive_failures >= 5:
+            log_event(
+                logging.ERROR,
+                "failure_backoff",
+                f"{consecutive_failures} consecutive failures; sleeping 30s",
+            )
+            time.sleep(30)
+            consecutive_failures = 0
+            pool.sync_from_disk()
+
+    log_event(logging.INFO, "container_stop", "playout controller shutting down")
     pool.close()
     return 0
 

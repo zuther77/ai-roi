@@ -3,9 +3,10 @@
 For an agent or developer picking this project up cold. Read this first, then
 the two design documents in the section below.
 
-**Status as of 2026-09-21:** Day 1 complete and verified. Day 2 implemented and
-committed, **acceptance criteria not yet verified by the owner**. Day 3 not
-started.
+**Status as of 2026-09-22:** Days 1–2 complete and verified by the owner
+(including encoder pacing fixes after live YouTube health issues). Day 3
+implemented and pushed; **acceptance criteria not yet verified by the owner**.
+Day 4 not started.
 
 ---
 
@@ -162,87 +163,47 @@ repeat. `stream.sh` owns all the FFmpeg flags and pushes to YouTube over RTMP.
 ## 5. Verification state
 
 ### Day 1 — complete, verified by the owner
-Owner confirmed a live stream using their own track and image. All four
-criteria met.
+Owner confirmed a live stream using their own track and image.
 
-### Day 2 — implemented, NOT yet verified
-Automated checks that do pass:
-- 9/9 unit tests, ~1ms, no FFmpeg or network:
-  `docker compose run --rm playout python -m unittest -v`
-- A dry-run rotation aired all 5 tracks before any repeat (`2→3→4→1→5→2→3`),
-  probed durations correctly, incremented play counts, and wrote
-  `current_track.txt`.
+### Day 2 — complete, verified by the owner (with caveats)
+Owner confirmed healthy streaming after encoder fixes. Do not reintroduce:
 
-Still outstanding, and only the owner can do these:
-- [ ] Stream runs ≥2 hours playing visibly different tracks
-- [ ] `play_count` increments and no track repeats back-to-back in a real run
+1. Large still image re-decoded every frame → YouTube yellow. Fixed by
+   pre-scaling once per track to `/tmp/playout-image.jpg`.
+2. Filter-graph `loop=-1` without pacing → ~62 Mbps flood → "No data". Fixed
+   by dropping that pattern; use paced demuxer on the pre-scaled JPEG.
+3. Stream key can appear in `docker compose top` argv — prefer logs; rotate
+   key if exposed.
 
-**The pool is ready.** The synthetic sine tones used during development have
-been replaced with 12 real royalty-free tracks (IDs 6–17), durations 122–254s,
-averaging 161s — about 32 minutes of audio, so a 2-hour run cycles it roughly
-3.7 times. The database reconciled itself on the next container start: the five
-tone rows were dropped and the new files added with `ffprobe` durations, with no
-manual intervention. That exercised the remove-and-add path of
-`sync_from_disk()` successfully.
+Twelve royalty-free tracks in `filler-pool/audio/` (IDs 6–17).
 
-A `.DS_Store` file in `filler-pool/audio/` is correctly ignored by the
-`AUDIO_EXTENSIONS` filter rather than being handed to `ffprobe`.
+### Day 3 — implemented, NOT yet verified
+- `restart: always` on `playout`
+- `deploy/radio-stack.service` — Linux-only `docker compose up -d` boot trigger
+- JSON structured logs → stdout + `logs/playout.jsonl`
+- Corrupt/missing tracks → `track_skipped`, container stays up
+- `entrypoint.sh` 2s delay (Compose has no RestartSec)
+
+Owner must still verify: compose restart policy, `docker kill` recovery,
+corrupt-file skip live, and (Linux only) reboot persistence.
 
 ---
 
 ## 6. Known risks and open items
 
-**The RTMP reconnect risk (highest priority unknown).** Restarting FFmpeg per
-track means the RTMP connection drops and re-establishes between every track —
-roughly 40 reconnects over a 2-hour run. The plan explicitly chose this
-("restart FFmpeg per-track (simplest, small gap risk)") and deferred the
-gapless alternative. It is untested at length. If the 2-hour run degrades
-YouTube's stream health or ends the broadcast, the fix is the deferred approach:
-one long-lived FFmpeg reading from a playlist it tails, or from a FIFO fed by
-per-track decoders. Do not pre-build this; wait for evidence.
+**Restart-per-track vs design-spec FFmpeg supervisor.** Spec Section 3.8 assumes
+one long-lived FFmpeg. Day 2–3 restart FFmpeg every track. Exit code 0 is a
+normal track change — not a crash for Day 17 metrics. Gapless remains deferred.
 
-**Error handling is deliberately thin.** A corrupt file is skipped at scan time
-with a log line, and a non-zero FFmpeg exit logs an error and moves on. Proper
-handling is Day 3's task; do not build it early.
-
-**Structured logging is not done.** Current logging is `logging.basicConfig` to
-stdout. Day 3 Task 3 replaces it.
-
-**Open questions that will block specific future days** (design spec Section 10):
-- #1 artist/style-mimicry moderation policy — blocks Day 11
-- #4 filler pool retention policy — spec Section 11.4 wants it locked before
-  the Queue Manager
-- #7 Gemini Lyra spend cap default — relevant from Day 13
-- `SAFETY_MARGIN_SEC` value — needed at Day 9; spec Section 11.4 says start
-  around 120s but write it as config, never hardcoded
-
-**Docs history note.** Commit `ac091bf "Updated sys design"` was made by the
-owner and adds `test-assets/README.md`; the message does not describe its
-contents.
+**Open questions** (design spec Section 10): #1 moderation (Day 11), #4 filler
+retention, #7 Gemini spend cap, `SAFETY_MARGIN_SEC` (Day 9, ~120s as config).
 
 ---
 
-## 7. Next step: Day 3
+## 7. Next step: Day 4
 
-Read the Day 3 section of `detailed-plan.md`. Summary of its shape, not a
-substitute for reading it:
-
-**Objective:** the stream survives a crash, a reboot, or FFmpeg dying with zero
-manual intervention.
-
-**Tasks:** add `restart: always` to every Compose service; add one minimal
-systemd unit for the Linux box only whose sole job is `docker compose up -d`;
-add structured logging; deliberately inject three failures (`docker kill`, a
-host restart, and a corrupt/zero-byte track).
-
-**The pitfall to respect:** do not put application logic in the systemd unit.
-Its entire job is running one Compose command. Also note Compose has no restart
-backoff the way systemd's `RestartSec` does, so a genuine crash-loop can hammer
-CPU and logs — if that happens, the fix is a sleep inside the entrypoint.
-
-Note the Linux production box does not exist yet. Day 3's boot-persistence
-criterion is explicitly expected not to apply on macOS, and the plan says so;
-that is not a bug to solve.
+Sprint 2 — network + Redis job queue with DELL. Read `detailed-plan.md` Day 4.
+Needs physical Ethernet link between master and DELL.
 
 ---
 
@@ -251,32 +212,24 @@ that is not a bug to solve.
 ```sh
 cd /Users/zuths/Desktop/Vibe/ai-roi/ai-roi
 
-docker compose build                                    # rebuild the image
-docker compose up                                       # go live (foreground)
-docker compose down                                     # stop cleanly
-docker compose logs -f playout                          # follow logs
-docker compose run --rm playout python -m unittest -v   # unit tests
-docker compose run --rm playout bash                    # shell in container
+docker compose build
+docker compose up -d
+docker compose down
+docker compose logs -f playout
+docker compose run --rm --entrypoint "" playout python -m unittest -v
+docker compose run --rm --entrypoint "" playout bash
 
-# Encode 5s to nowhere instead of YouTube
-docker compose run --rm -e DRY_RUN=1 playout
-
-# Inspect rotation state
-cat filler-pool/current_track.txt
+# Day 3 crash test
+docker kill "$(docker compose ps -q playout)"
+docker compose ps
+tail -f logs/playout.jsonl
 ```
 
 ### Secrets hygiene — this repo is public
 
-`.env` has never been committed on any branch; verify before every push:
-
 ```sh
-git log --all --full-history --oneline -- .env
+git log --all --full-history --oneline -- .env   # must be empty
 ```
 
-That must return nothing. `stream.sh` deliberately logs only the RTMP base URL
-and never the assembled target, because the target string ends in the stream
-key and `docker compose logs` is not private. Keep it that way.
+Prefer `docker compose logs` over `docker compose top` (argv can leak the key).
 
-The owner's real stream key is in `.env`, with a backup at `.env.bak` (also
-gitignored). An unlisted test stream is used for all of Sprint 1; the real
-channel key does not appear until Day 18.

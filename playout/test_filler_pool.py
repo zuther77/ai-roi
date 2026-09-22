@@ -7,12 +7,11 @@ subprocess, no filesystem and no network. They run in milliseconds.
 
 Run them with:
 
-    docker compose run --rm playout python -m unittest -v
+    docker compose run --rm --entrypoint "" playout python -m unittest -v
 
-No -s flag is needed: the image's WORKDIR is /app, and bare ``unittest``
-discovers from the current directory. Keeping the command short also stops it
-from line-wrapping when copied into a terminal, which silently breaks the
-longer ``discover -s /app`` form.
+``--entrypoint ""`` is required since Day 3: the image ENTRYPOINT is a short
+startup-delay shell that then launches the controller. Clearing it restores
+ad-hoc commands (tests, ffmpeg, bash).
 
 stdlib ``unittest`` is used rather than pytest so no extra dependency has to be
 installed into the image just to run tests.

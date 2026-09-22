@@ -27,6 +27,16 @@ services:
     # .env, which is gitignored.
     env_file: .env
 
+    # Day 3: Compose restarts the container if it exits for any reason other
+    # than an explicit `docker compose stop/down`. This is the crash-recovery
+    # mechanism that works identically on macOS and Linux — no OS supervisor
+    # for the app itself.
+    #
+    # Note: Compose has no RestartSec. A genuine crash-loop can hammer CPU and
+    # logs. The entrypoint sleeps a couple of seconds before starting to blunt
+    # that (see playout/entrypoint.sh).
+    restart: always
+
     volumes:
       # Mount the host's test-assets directory into the container, read-only.
       #
@@ -49,7 +59,5 @@ services:
       # what Day 3's crash-recovery testing depends on.
       - ./filler-pool:/app/filler-pool
 
-    # No `restart:` policy yet — that is Day 3's job, along with the systemd
-    # boot trigger. Today the goal is only to prove the stream works at all,
-    # and a container that silently restarts would hide a startup failure we
-    # actually want to see.
+      # Day 3 structured logs, readable from the host on either OS.
+      - ./logs:/app/logs
