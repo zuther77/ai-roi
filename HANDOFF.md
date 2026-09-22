@@ -4,8 +4,10 @@ For an agent or developer picking this project up cold. Read this first, then
 the two design documents in the section below.
 
 **Status as of 2026-09-22:** **Sprint 1 complete** (Days 1–3 + Option A
-gapless), verified by the owner — live stream with no hiccups / “No data”
-between tracks. Day 4 not started.
+gapless), verified by the owner on the MacBook. **Master is moving to Linux
+before Sprint 2** (owner decision — better fit for Redis bind + NFS to DELL).
+Day 4 not started; do not start Day 4 until Sprint 1 compose runs on the
+Linux master and the DELL direct link is available.
 
 ---
 
@@ -23,6 +25,33 @@ keys" is a hard requirement rather than a nicety.
 The non-negotiable requirement, which everything else is designed around:
 **the stream never stops.** Even with every generation source dead, the master
 keeps broadcasting from its local filler pool.
+
+---
+
+## 1b. Deployment roles (owner decision 2026-09-22)
+
+| Role | Machine | Notes |
+|------|---------|--------|
+| **Master** | **Linux** (production box) | From Sprint 2 onward. Docker Engine + Compose. Owns playout, Redis, NFS, Queue Manager. Direct Ethernet to DELL on `192.168.50.0/24` (master `.1`, DELL `.2`). Separate interface/Wi‑Fi for internet / YouTube RTMP. |
+| **Worker — DELL** | DELL laptop (RTX 2060) | Generation worker; direct link only for master↔DELL. |
+| **Worker / portable — MacBook** | MacBook Air M4 | No longer the master. Remains the Apple Silicon worker (native ACE-Step/MLX) on the home LAN later; can still be used to edit code and push to GitHub. |
+
+Sprint 1 was developed and verified with the MacBook as temporary master
+(Docker Desktop). That was always the intended *dev* path in the spec; the
+owner is promoting Linux to master early so Sprint 2 does not fight Docker
+Desktop networking or macOS-as-NFS-server.
+
+**Before Day 4 — Linux master checklist (owner):**
+1. Clone `https://github.com/zuther77/ai-roi` on the Linux box; copy `.env`
+   (stream key) and `filler-pool/` / `test-assets/` media from the Mac (or
+   re-seed filler audio). Specs (`design-spec.md`, `detailed-plan.md`) live
+   *beside* the repo if you keep the same layout — they are not in git.
+2. Install Docker Engine + Compose plugin (not Docker Desktop).
+3. `docker compose up -d --build` and confirm filler stream still reaches
+   YouTube (Sprint 1 regression).
+4. Optional: enable `deploy/radio-stack.service` so compose starts on boot.
+5. Cable master↔DELL; static IPs `192.168.50.1` / `.2`; ping both ways; confirm
+   master internet still works on the other interface.
 
 ---
 
@@ -71,11 +100,12 @@ These are the owner's explicit rules. They matter more than moving fast.
 3. **Pitfalls are known failure modes, not generic caveats.** If you hit one,
    say so explicitly instead of quietly working around it.
 4. **Everything runs in Docker / Docker Compose.** No native installs for the
-   app. No case-sensitive-filesystem assumptions (dev is macOS, prod is Linux).
-   No systemd beyond the single boot-trigger unit in the spec. The owner has
-   FFmpeg installed on the host; it is **not** to be used by the application —
-   host is 9.0.1 while the container is 7.1.5, which is exactly the divergence
-   containerisation exists to prevent.
+   app (except the Day 4 DELL worker *skeleton* script, which the plan allows
+   before containerizing). No case-sensitive-filesystem assumptions in code.
+   Master runtime from Sprint 2 on is **Linux** (Docker Engine). macOS remains
+   fine for editing/pushing; do not treat Docker Desktop as the Sprint 2
+   master. No systemd beyond the single boot-trigger unit in the spec. Host
+   FFmpeg (if installed) is **not** used by the app — containers ship their own.
 5. **Open questions require asking.** If a task needs a decision the spec marks
    as an open question (Section 10) or "decide before implementing", stop and
    ask. Do not pick a default silently.
@@ -89,9 +119,9 @@ These are the owner's explicit rules. They matter more than moving fast.
 
 ## 4. Current state of the code
 
-Repo: `/Users/zuths/Desktop/Vibe/ai-roi/ai-roi`
-Remote: `https://github.com/zuther77/ai-roi` — **public**, `main` branch,
-`gh` authenticated as `zuther77`.
+Repo (Linux master clone path will differ): historically developed at
+`/Users/zuths/Desktop/Vibe/ai-roi/ai-roi` on the MacBook.
+Remote: `https://github.com/zuther77/ai-roi` — **public**, `main` branch.
 
 ```
 .env                     gitignored; holds the real YouTube stream key
@@ -207,14 +237,20 @@ Do not start unless the owner asks; Option A is the Sprint 1 path.
 ## 8. Next step: Day 4
 
 Sprint 2 — network + Redis job queue with DELL. Read `detailed-plan.md` Day 4.
-Needs physical Ethernet link between master and DELL.
+
+**Prerequisites (owner):** Linux master running Sprint 1 stack; Cat5e/Cat6
+master↔DELL; static `192.168.50.1` / `.2`; bidirectional ping; master internet
+intact. Then: Redis in Compose bound to the private-subnet IP, job schema,
+DELL-side claim script, master-side fake push.
 
 ---
 
 ## 9. Practical reference
 
+On the **Linux master** (paths will differ from the Mac checkout):
+
 ```sh
-cd /Users/zuths/Desktop/Vibe/ai-roi/ai-roi
+cd /path/to/ai-roi          # wherever you cloned
 
 docker compose build
 docker compose up -d
