@@ -3,11 +3,9 @@
 For an agent or developer picking this project up cold. Read this first, then
 the two design documents in the section below.
 
-**Status as of 2026-09-22:** Days 1–3 implemented. Day 1–2 verified by the
-owner. Day 3 crash-recovery acceptance not yet owner-verified. **Option A
-gapless playout is implemented** (Sprint 1 bar: continuous RTMP with static
-image + changing audio; crash → brief no-data is an accepted trade-off).
-Day 4 not started.
+**Status as of 2026-09-22:** **Sprint 1 complete** (Days 1–3 + Option A
+gapless), verified by the owner — live stream with no hiccups / “No data”
+between tracks. Day 4 not started.
 
 ---
 
@@ -168,17 +166,17 @@ Owner confirmed healthy streaming after encoder fixes. Do not reintroduce:
 
 Twelve royalty-free tracks in `filler-pool/audio/` (IDs 6–17).
 
-### Day 3 — implemented, NOT yet verified
+### Day 3 — complete, verified by the owner
 - `restart: always` on `playout`
 - `deploy/radio-stack.service` — Linux-only `docker compose up -d` boot trigger
 - JSON structured logs → stdout + `logs/playout.jsonl`
 - Corrupt/missing tracks → `track_skipped`, container stays up
 - `FORCE_CRASH` file (not `docker kill`) exercises Compose restart policy
 
-### Gapless (Option A) — implemented, owner must verify live
-Dry-run in container succeeded (concat mode, ~1x realtime). Live check: one
-FFmpeg session should span multiple track changes with **no** YouTube
-"No data" between songs. Image stays up the whole time.
+### Gapless (Option A) — complete, verified by the owner
+Live YouTube: continuous RTMP across track changes, static image + changing
+audio, no hiccups / “No data” between songs. Crash → brief no-data remains an
+accepted trade-off; Option B (FIFO) stays future work.
 
 ---
 
@@ -209,8 +207,7 @@ Do not start unless the owner asks; Option A is the Sprint 1 path.
 ## 8. Next step: Day 4
 
 Sprint 2 — network + Redis job queue with DELL. Read `detailed-plan.md` Day 4.
-Needs physical Ethernet link between master and DELL. Only after Sprint 1
-gapless is owner-verified live.
+Needs physical Ethernet link between master and DELL.
 
 ---
 
