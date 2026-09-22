@@ -61,3 +61,32 @@ services:
 
       # Day 3 structured logs, readable from the host on either OS.
       - ./logs:/app/logs
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Day 4 — Redis: the shared job queue between master and the DELL worker
+  # (design spec Section 3.5; detailed-plan Day 4). A Compose service, not a
+  # native install — the master stays 100% containerized (working rule 4).
+  redis:
+    image: redis:7-alpine
+
+    # Password from .env — never a passwordless Redis, even on the private
+    # direct-link subnet (Day 4 pitfall). Passed via the container
+    # environment and expanded by the shell inside the container, so the
+    # value never appears in this committed file or in `docker compose top`
+    # argv (the Day 2 stream-key lesson).
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    command: >
+      sh -c 'exec redis-server --requirepass "$$REDIS_PASSWORD"'
+
+    # Published on the direct-link IP only — never 0.0.0.0. The DELL (.2)
+    # and the master itself can reach it; the general home LAN cannot
+    # (spec Section 3.5). If the 192.168.50.1 interface is down, Compose
+    # fails to bind this port — that is deliberate, not a bug.
+    ports:
+      - "192.168.50.1:6379:6379"
+
+    # Day 4 deliberately keeps this a skeleton queue: no persistence
+    # volume yet. Redis holds only transient job state here; making job
+    # state survive a Redis restart is Day 6 (worker failure-safety).
+    restart: always
