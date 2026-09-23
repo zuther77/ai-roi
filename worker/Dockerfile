@@ -58,13 +58,21 @@ COPY requirements.txt setup.py README.md LICENSE ./
 COPY acestep/ ./acestep/
 COPY config/ ./config/
 
-# Two layers: the big requirements download (torch cu126 is multi-GB) caches
-# separately from `pip install .`, so a setup hiccup never re-downloads
-# PyTorch.
+# The torch trio is pinned +cu126 and installed FIRST, from the cu126 index
+# ONLY (--index-url, not an extra index): PyPI's newer torch is built for a
+# different CUDA (13.0 at the time of this fix) and pip's resolver lets it win
+# over an extra index when requirements.txt leaves torch unpinned - producing
+# the "PyTorch and torchvision were compiled with different CUDA versions"
+# crash on first run. Plan pitfall: pin exact versions, don't install latest.
+# Pairing verified against the cu126 index: torch 2.6.0 <-> torchvision
+# 0.21.0 <-> torchaudio 2.6.0 (matches the transformers 4.50 /
+# pytorch_lightning 2.5.1 era of ACE-Step's requirements).
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir hf_transfer peft \
-    && pip install --no-cache-dir -r requirements.txt \
-        --extra-index-url https://download.pytorch.org/whl/cu126
+    && pip install --no-cache-dir \
+        torch==2.6.0+cu126 torchvision==0.21.0+cu126 torchaudio==2.6.0+cu126 \
+        --index-url https://download.pytorch.org/whl/cu126
+RUN pip install --no-cache-dir -r requirements.txt
 RUN pip install --no-cache-dir .
 
 # Runs as root: dell_worker.py mounts the master's NFS export into /app/tracks
