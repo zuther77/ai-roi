@@ -10,7 +10,7 @@ cd "$(dirname "$0")/.."
 
 JOB_ID=$(cat /proc/sys/kernel/random/uuid)
 CREATED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-JOB_JSON="{\"job_id\": \"$JOB_ID\", \"prompt\": \"test\", \"target_duration_sec\": 30, \"priority\": \"live\", \"created_at\": \"$CREATED_AT\"}"
+JOB_JSON="{\"job_id\": \"$JOB_ID\", \"prompt\": \"upbeat electronic dance track\", \"target_duration_sec\": 30, \"priority\": \"live\", \"created_at\": \"$CREATED_AT\"}"
 
 echo "pushing job $JOB_ID onto jobs:pending"
 docker compose exec -T redis sh -c \
