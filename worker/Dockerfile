@@ -51,15 +51,20 @@ WORKDIR /opt/acestep
 # Runtime code only. The pinned checkout is the single source of truth for
 # versions (requirements.txt pins: diffusers>=0.33.0, pytorch_lightning==2.5.1,
 # transformers==4.50.0, ...; torch comes from the cu126 extra index).
-COPY requirements.txt setup.py ./
+# README.md is required by setup.py itself (long_description), LICENSE for
+# provenance. Missing README.md was the first build failure on DELL.
+COPY requirements.txt setup.py README.md LICENSE ./
 COPY acestep/ ./acestep/
 COPY config/ ./config/
 
+# Two layers: the big requirements download (torch cu126 is multi-GB) caches
+# separately from `pip install .`, so a setup hiccup never re-downloads
+# PyTorch.
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir hf_transfer peft \
     && pip install --no-cache-dir -r requirements.txt \
-        --extra-index-url https://download.pytorch.org/whl/cu126 \
-    && pip install --no-cache-dir .
+        --extra-index-url https://download.pytorch.org/whl/cu126
+RUN pip install --no-cache-dir .
 
 RUN mkdir -p /app/checkpoints /app/tracks /app/logs \
     && chown -R appuser:appuser /app
