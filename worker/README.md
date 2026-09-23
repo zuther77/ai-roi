@@ -25,10 +25,19 @@ installed and exporting on the master (owner-run once, needs sudo):
 
 ```sh
 sudo apt-get install -y nfs-kernel-server
-sudo mkdir -p /srv/radio/tracks && sudo chown nobody:nogroup /srv/radio/tracks
-echo '/srv/radio/tracks 192.168.50.2(rw,sync,no_subtree_check)' | sudo tee -a /etc/exports
+sudo mkdir -p /srv/radio/tracks
+# Sticky-writable (/tmp model): the DELL's WSL user (uid 1000), squashed
+# root (uid 65534) and the container's appuser (uid 1001) all need to write.
+sudo chmod 1777 /srv/radio/tracks
+# `insecure` is required: WSL2's NAT remaps the NFS client's source port to
+# an unprivileged one, and nfsd rejects non-privileged ports without it.
+echo '/srv/radio/tracks 192.168.50.2(rw,sync,no_subtree_check,insecure)' | sudo tee -a /etc/exports
 sudo exportfs -ra
 ```
+
+Both extras are verified end-to-end on the real DELL-master link
+(owner-confirmed 2026-09-23): mount, write from DELL, and read-back on the
+master all work.
 
 ## DELL: one-time setup (WSL2, inside any distro)
 
