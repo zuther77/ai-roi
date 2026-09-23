@@ -22,7 +22,12 @@ Environment (all set at `docker run` time, see worker/README.md):
     REDIS_URL              default redis://192.168.50.1:6379/0
     REDIS_PASSWORD         required (master's .env)
     CHECKPOINT_PATH        default /app/checkpoints (bind-mounted, persistent)
-    TRACKS_DIR             default /app/tracks (the NFS export)
+    TRACKS_DIR             default /app/tracks (mounted from NFS_SOURCE below)
+    NFS_SOURCE             default 192.168.50.1:/srv/radio/tracks - the master's
+                           export, mounted INSIDE the container at startup
+                           (Docker Desktop cannot pass a WSL NFS mount through
+                           as a bind mount)
+    WORKER_MOUNT_NFS       default 1 - mount NFS_SOURCE at TRACKS_DIR at startup
     WORKER_CPU_OFFLOAD     default 1  — ACE-Step low-VRAM tier
     WORKER_OVERLAPPED_DECODE default 1 — same tier
     WORKER_QUANTIZED       default 0  — spec maps its "INT8" wording to this
@@ -40,6 +45,7 @@ import json
 import os
 import re
 import socket
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -53,10 +59,32 @@ DEFAULT_REDIS_URL = "redis://192.168.50.1:6379/0"
 
 CHECKPOINT_PATH = os.environ.get("CHECKPOINT_PATH", "/app/checkpoints")
 TRACKS_DIR = os.environ.get("TRACKS_DIR", "/app/tracks")
+NFS_SOURCE = os.environ.get("NFS_SOURCE", "192.168.50.1:/srv/radio/tracks")
 
 
 def _env_flag(name: str, default: str = "0") -> bool:
     return os.environ.get(name, default).strip().lower() in ("1", "true", "yes")
+
+
+def ensure_tracks_mount() -> None:
+    """Mount the master's NFS export at TRACKS_DIR, inside this container.
+
+    Docker Desktop (WSL2 backend) cannot bind-mount a path that is itself an
+    NFS mount inside the WSL distro ("timed out waiting ... to be
+    automounted"), so the container mounts the export directly instead. The
+    shared WSL2 kernel has the NFS client; `docker run` needs
+    `--cap-add SYS_ADMIN`. Skipped when TRACKS_DIR is already a mount (dev
+    runs with a local dir bind-mounted) or WORKER_MOUNT_NFS=0.
+    """
+    if not _env_flag("WORKER_MOUNT_NFS", "1"):
+        return
+    if os.path.ismount(TRACKS_DIR):
+        log("tracks_mount_ok", source="<already mounted>", target=TRACKS_DIR)
+        return
+    os.makedirs(TRACKS_DIR, exist_ok=True)
+    log("tracks_mounting", source=NFS_SOURCE, target=TRACKS_DIR)
+    subprocess.run(["mount", "-t", "nfs", NFS_SOURCE, TRACKS_DIR], check=True)
+    log("tracks_mount_ok", source=NFS_SOURCE, target=TRACKS_DIR)
 
 
 class RedisError(Exception):
@@ -286,6 +314,14 @@ def main() -> int:
     log("worker_start",
         redis_url=f"redis://{parsed.hostname}:{parsed.port or 6379}",
         tracks_dir=TRACKS_DIR, checkpoint_path=CHECKPOINT_PATH)
+
+    try:
+        ensure_tracks_mount()
+    except Exception as exc:
+        log("worker_start_error", reason="NFS mount failed",
+            hint="run with --cap-add SYS_ADMIN (or --privileged)",
+            error=str(exc)[:300])
+        return 4
 
     try:
         gen = Generator()  # load once, before any claim

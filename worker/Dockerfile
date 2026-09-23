@@ -18,8 +18,10 @@
 #
 # Runtime expectations (see worker/README.md for the full run command):
 #   * GPU: run with --gpus all (Docker Desktop WSL2 backend on Windows)
-#   * /app/checkpoints : bind-mounted persistent model weights
-#   * /app/tracks      : the master's NFS export, mounted via WSL2
+#   * /app/checkpoints : named volume (persistent model weights)
+#   * /app/tracks      : the master's NFS export, mounted INSIDE the container
+#                        by dell_worker.py at startup (Docker Desktop cannot
+#                        pass a WSL-side NFS mount through as a bind mount)
 #   * /app/dell_worker.py : this repo's worker script, bind-mounted read-only
 
 FROM nvidia/cuda:12.6.0-runtime-ubuntu22.04
@@ -37,14 +39,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     git \
     curl \
+    nfs-common \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* \
     && ln -s /usr/bin/python3 /usr/bin/python
 
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
-
-RUN useradd -m -u 1001 appuser
 
 WORKDIR /opt/acestep
 
@@ -66,10 +67,13 @@ RUN pip install --no-cache-dir --upgrade pip \
         --extra-index-url https://download.pytorch.org/whl/cu126
 RUN pip install --no-cache-dir .
 
-RUN mkdir -p /app/checkpoints /app/tracks /app/logs \
-    && chown -R appuser:appuser /app
+# Runs as root: dell_worker.py mounts the master's NFS export into /app/tracks
+# at startup, which needs CAP_SYS_ADMIN (run with --cap-add SYS_ADMIN). Root
+# is contained by Docker; server-side, root_squash maps it to nobody (uid
+# 65534) writing into the 1777 target dir — root inside the container has no
+# privileged meaning on the master's filesystem.
+RUN mkdir -p /app/checkpoints /app/tracks /app/logs
 
-USER appuser
 WORKDIR /app
 
 CMD ["python", "/app/dell_worker.py"]

@@ -26,8 +26,8 @@ installed and exporting on the master (owner-run once, needs sudo):
 ```sh
 sudo apt-get install -y nfs-kernel-server
 sudo mkdir -p /srv/radio/tracks
-# Sticky-writable (/tmp model): the DELL's WSL user (uid 1000), squashed
-# root (uid 65534) and the container's appuser (uid 1001) all need to write.
+# Sticky-writable (/tmp model): the DELL's WSL user (uid 1000) and squashed
+# root (uid 65534 - root inside the worker container included) need to write.
 sudo chmod 1777 /srv/radio/tracks
 # `insecure` is required: WSL2's NAT remaps the NFS client's source port to
 # an unprivileged one, and nfsd rejects non-privileged ports without it.
@@ -42,11 +42,12 @@ master all work.
 ## DELL: one-time setup (WSL2, inside any distro)
 
 ```sh
-# NFS mount — WSL2's Linux kernel does this natively (works on Windows Home;
-# the Pro-only "Services for NFS" is NOT used by this route)
+# The worker container mounts the master's NFS export ITSELF at startup (see
+# Run below), so a WSL-side mount is no longer required. One is still handy
+# for manual inspection from WSL (and works natively - Windows Home's lack
+# of "Services for NFS" is irrelevant on this route):
 sudo mkdir -p /mnt/radio-tracks
-sudo mount -t nfs 192.168.50.1:/srv/radio/tracks /mnt/radio-tracks
-echo '192.168.50.1:/srv/radio/tracks /mnt/radio-tracks nfs defaults 0 0' | sudo tee -a /etc/fstab
+sudo mount -t nfs 192.168.50.1:/srv/radio/tracks /mnt/radio-tracks  # optional
 
 # GPU sanity check (plan Day 5 task 3)
 docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi
@@ -76,14 +77,26 @@ docker build -f ../ai-roi/worker/Dockerfile -t ai-roi-worker .
 ## Run
 
 ```sh
-docker run --rm --gpus all \
+docker volume create ace-checkpoints   # persistent model weights
+
+docker run --rm --gpus all --cap-add SYS_ADMIN \
   -e REDIS_URL=redis://192.168.50.1:6379/0 \
   -e REDIS_PASSWORD=<from master's .env> \
-  -v ~/ace-checkpoints:/app/checkpoints \
-  -v /mnt/radio-tracks:/app/tracks \
+  -e NFS_SOURCE=192.168.50.1:/srv/radio/tracks \
+  -v ace-checkpoints:/app/checkpoints \
   -v <path-to>/ai-roi/worker/dell_worker.py:/app/dell_worker.py:ro \
   ai-roi-worker
 ```
+
+Why no `-v /mnt/radio-tracks:/app/tracks`: Docker Desktop (WSL2 backend)
+**cannot bind-mount a path that is itself an NFS mount inside the WSL
+distro** — it times out with "timed out waiting ... to be automounted". The
+worker therefore mounts the export directly, inside the container (the
+shared WSL2 kernel has the NFS client). That needs `--cap-add SYS_ADMIN`;
+if the mount still fails, retry with `--privileged`. If the *script* mount
+hits the same automount timeout, your ai-roi checkout lives inside the WSL
+distro — copy `dell_worker.py` to a Windows path and mount it via its
+`/mnt/c/...` path instead.
 
 First start takes a while: checkpoint download + model load (logged as
 `model_load_start` → `model_loaded` with the load time). Then it blocks on
@@ -96,7 +109,9 @@ First start takes a while: checkpoint download + model load (logged as
 | `REDIS_URL` | `redis://192.168.50.1:6379/0` | master's direct-link IP |
 | `REDIS_PASSWORD` | — | required, from master's `.env` |
 | `CHECKPOINT_PATH` | `/app/checkpoints` | bind-mounted persistent weights |
-| `TRACKS_DIR` | `/app/tracks` | the NFS export, atomic rename target |
+| `TRACKS_DIR` | `/app/tracks` | mount point for NFS_SOURCE, atomic rename target |
+| `NFS_SOURCE` | `192.168.50.1:/srv/radio/tracks` | master's export, mounted inside the container at startup |
+| `WORKER_MOUNT_NFS` | `1` | set `0` only when TRACKS_DIR is already a mount |
 | `WORKER_CPU_OFFLOAD` | `1` | ACE-Step low-VRAM tier (6 GB RTX 2060) |
 | `WORKER_OVERLAPPED_DECODE` | `1` | same tier |
 | `WORKER_QUANTIZED` | `0` | spec's "INT8" maps to ACE-Step's `quantized` flag; off until quantized-weight auto-download is verified on first run |
