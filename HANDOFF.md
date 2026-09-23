@@ -10,8 +10,9 @@ The master is now the Linux box. **Day 4 implemented** - Redis as a Compose
 service published only on `192.168.50.1:6379`, DELL worker skeleton
 (`worker/dell_worker.py`), master-side fake-job push
 (`worker/push_test_job.sh`). Master-side round-trip (push -> claim -> ack)
-machine-verified in Docker; **owner verification on DELL still pending**.
-Do not start Day 5 until the Day 4 acceptance criteria are owner-verified.
+machine-verified in Docker; **owner-verified on DELL 2026-09-22**
+(claim-exactly-once and kill-mid-claim orphan test both passed).
+**Day 5 in progress** - real generation, containerized.
 
 ---
 
