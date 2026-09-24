@@ -80,9 +80,11 @@ docker build -f ../ai-roi/worker/Dockerfile -t ai-roi-worker .
 docker volume create ace-checkpoints   # persistent model weights
 
 docker run --rm --gpus all --cap-add SYS_ADMIN \
+  -p 8001:8001 \
   -e REDIS_URL=redis://192.168.50.1:6379/0 \
   -e TORCHINDUCTOR_CACHE_DIR=/app/checkpoints/torchinductor \
   -e REDIS_PASSWORD=<from master's .env> \
+  -e WORKER_SHARED_SECRET=<from master's .env> \
   -e NFS_SOURCE=192.168.50.1:/srv/radio/tracks \
   -v ace-checkpoints:/app/checkpoints \
   -v <path-to>/ai-roi/worker/dell_worker.py:/app/dell_worker.py:ro \
@@ -117,6 +119,64 @@ First start takes a while: checkpoint download + model load (logged as
 | `WORKER_OVERLAPPED_DECODE` | `1` | same tier |
 | `WORKER_QUANTIZED` | `0` | `1` = INT4wo weights via the q4-K-M HF repo (see notes) + forced torch.compile. Baseline on the RTX 2060: 1365.55 s per 30 s clip |
 | `WORKER_TORCH_COMPILE` | `0` | non-quantized path only; candidate step-speedup lever |
+| `WORKER_SHARED_SECRET` | — | from master's .env; required by /health (x-worker-secret header) |
+| `WORKER_HEALTH_PORT` | `8001` | /health listener; publish with `-p 8001:8001` |
+| `WORKER_LEASE_MULTIPLIER` | `3` | lease = expected x this; use `0.02` for fast Day 6 failure tests |
+| `WORKER_EXPECTED_PER_TARGET_SEC` | `50` | fixed-guess lease sizing (from the 1365.55 s / 30 s baseline); rolling average replaces it Day 9 |
+
+## Day 6 — job leases, /health, generation stats
+
+The worker writes a lease key (`job:lease:<job_id>`, TTL =
+`target_duration_sec x 50 x WORKER_LEASE_MULTIPLIER`) on claim, deletes it
+on ack, serves `/health` on port 8001, and pushes completed-job timing to
+the `generation:stats` Redis list. On the master, the `queue-reaper`
+Compose service (part of the stack, `restart: always`) scans every 30 s:
+it requeues `jobs:in_progress` entries whose lease expired (LREM first,
+then RPUSH only if the LREM removed it - race-safe against a worker acking
+at the same instant), and drains the stats list into
+`queue/generation_stats.db` (SQLite, master-local; SQLite over NFS is not
+trustworthy).
+
+This deliberately changes Day 4's "orphan never re-claimed" behavior: an
+orphaned job returns to `jobs:pending` once its lease expires and any
+worker can reclaim it. With production defaults that is ~2.5 h for a 60 s
+job.
+
+Health check (from the master or DELL):
+
+    curl -m 5 -H "x-worker-secret: <WORKER_SHARED_SECRET>" http://192.168.50.2:8001/health
+
+`{"status": "ok", "gpu_available": true, "model_loaded": true}` once
+ready; `"starting"` during model load; refused/timeout when the container
+is down (must fail fast, not hang - that is the acceptance criterion).
+
+### Failure tests (plan Day 6 task 4 - run each 2-3x)
+
+For tests 1 and 2, run the worker with `-e WORKER_LEASE_MULTIPLIER=0.02`
+(lease ~= 60 s for a 60 s job) so recovery is observable in minutes; keep
+the default 3 in production.
+
+1. **Kill mid-generation.** Push a job (`./worker/push_test_job.sh` on the
+   master), then `docker kill <container>` on DELL while it generates.
+   Expected: `docker compose logs queue-reaper` shows `job_requeued` within
+   ~a minute of the lease lapsing; the job is back on `jobs:pending`;
+   restart the worker -> it claims and completes the job; `jobs:in_progress`
+   ends empty.
+2. **Cable pull mid-generation.** Same, but physically unplug the Ethernet
+   instead of killing the container. The reaper runs on the master, so the
+   lease expires regardless of the link; on reconnect + worker restart the
+   job is reclaimed. (The worker's reconnect-forever loop also resumes.)
+3. **Disk full.** Do not fill the real disk - run with `-e
+   WORKER_MOUNT_NFS=0 --tmpfs /app/tracks:size=16k` so the temp write hits
+   ENOSPC. Expected: a loud `job_failed` log naming the disk error; lease
+   cleared, job acked; NO file (partial or otherwise) appears on the
+   master's `/srv/radio/tracks` - the temp-then-rename pattern holds.
+
+Master-side helpers during the tests:
+
+    docker compose logs -f queue-reaper
+    docker compose exec -T redis sh -c 'REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli LLEN jobs:pending'
+    python3 -c "import sqlite3; [print(r) for r in sqlite3.connect('queue/generation_stats.db').execute('SELECT * FROM generation_stats')]"
 
 ## Acceptance tests (Day 5)
 
@@ -141,7 +201,8 @@ First start takes a while: checkpoint download + model load (logged as
   use their export_quantized_weights path). The worker dispatches to the
   quantized loader correctly (load_quantized_checkpoint) when the flag is
   on. The spec's "INT8" wording maps to ACE-Step's INT4wo implementation.
-- Job failures are logged, cleaned up, and acked (queue not wedged);
-  retry/requeue policy is Day 6.
+- Job failures are logged, cleaned up, and acked; Day 6 adds the safety
+  net: the master's queue-reaper requeues any job whose lease expired
+  (worker died, link down, silent failure) once the lease window passes.
 - `live`/`filler` priority lanes and worker health heartbeats are later
   days, not this one.

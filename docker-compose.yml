@@ -77,7 +77,7 @@ services:
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD}
     command: >
-      sh -c 'exec redis-server --requirepass "$$REDIS_PASSWORD"'
+      sh -c 'exec redis-server --requirepass "$$REDIS_PASSWORD" --appendonly yes'
 
     # Published on the direct-link IP only — never 0.0.0.0. The DELL (.2)
     # and the master itself can reach it; the general home LAN cannot
@@ -86,7 +86,33 @@ services:
     ports:
       - "192.168.50.1:6379:6379"
 
-    # Day 4 deliberately keeps this a skeleton queue: no persistence
-    # volume yet. Redis holds only transient job state here; making job
-    # state survive a Redis restart is Day 6 (worker failure-safety).
+    # Day 6: queue persistence. appendonly + a named volume so pending and
+    # in-progress jobs survive a Redis restart (the Day 4 skeleton accepted
+    # that loss; Day 6's failure-safety goal does not).
+    volumes:
+      - redis-data:/data
     restart: always
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Day 6 — queue-reaper: job-lease enforcement + generation-stats recorder
+  # (detailed-plan Day 6). Runs on the master, deliberately independent of
+  # the DELL link — a dead or disconnected worker cannot leave a job stuck
+  # in jobs:in_progress forever, because lease expiry is decided here.
+  # restart: always per the plan's pitfall: never a one-off script.
+  queue-reaper:
+    image: python:3.12-slim
+    env_file: .env
+    environment:
+      # In-network address; .env's REDIS_URL is the DELL-facing one.
+      REDIS_URL: redis://redis:6379/0
+      STATS_DB: /app/queue/generation_stats.db
+    volumes:
+      - ./queue:/app/queue
+    command: ["python", "/app/queue/reaper.py"]
+    restart: always
+    depends_on:
+      - redis
+
+# Named volumes for Compose services (Day 6: Redis persistence).
+volumes:
+  redis-data:
