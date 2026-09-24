@@ -12,7 +12,13 @@ service published only on `192.168.50.1:6379`, DELL worker skeleton
 (`worker/push_test_job.sh`). Master-side round-trip (push -> claim -> ack)
 machine-verified in Docker; **owner-verified on DELL 2026-09-22**
 (claim-exactly-once and kill-mid-claim orphan test both passed).
-**Day 5 in progress** - real generation, containerized.
+**Day 5 complete** - real generation, containerized, owner-verified
+2026-09-24: real-prompt job claimed on DELL, generated, atomically
+temp-then-renamed onto the master's NFS export, playable .wav verified on
+the master. Measured on the RTX 2060 (cpu_offload tier): **1365.55 s per
+30 s clip** - the Sprint 3 timing baseline. **Day 6 not started** -
+failure-safety plan presented to the owner, implementation pending
+approval.
 
 ---
 
@@ -148,9 +154,12 @@ playout/
   playout_controller.py  builds playlist, one long-lived FFmpeg, repeats
   test_filler_pool.py    9 stdlib unittest tests
 worker/
-  dell_worker.py          Day 4 DELL skeleton: stdlib-only RESP2 client,
-                         atomic BRPOPLPUSH claim loop (jobs:pending →
-                         jobs:in_progress), reconnects forever, no pip deps
+  dell_worker.py          Day 5 DELL worker: Day 4 stdlib RESP2 client +
+                         ACE-Step pipeline loaded once at startup, atomic
+                         temp-write-then-rename onto NFS, measured timing,
+                         in-container NFS mount
+  Dockerfile              extends ACE-Step's image; build context is the
+                         pinned ACE-Step checkout; torch pinned to cu126
   push_test_job.sh        master-side fake-job push; redis-cli runs inside
                          the redis container, password never in argv
   README.md               how to run on DELL; what is deliberately not here yet
@@ -222,6 +231,28 @@ accepted trade-off; Option B (FIFO) stays future work.
 
 ---
 
+### Day 4 - complete, verified by the owner (2026-09-22)
+Redis as a Compose service published only on 192.168.50.1:6379 (requirepass,
+password via container env, never in argv). DELL worker skeleton (stdlib
+RESP2 client) with atomic BRPOPLPUSH claim and LREM ack. Owner-verified on
+DELL: claim-exactly-once; kill-mid-claim leaves the orphan in
+jobs:in_progress and a restart never re-claims it.
+
+### Day 5 - complete, verified by the owner (2026-09-24)
+Containerized ACE-Step worker: worker/Dockerfile extends their image; build
+context = the pinned ACE-Step checkout (1bee4c9f); torch trio pinned to
+2.6.0/0.21.0/2.6.0+cu126 after PyPI's cu13 torch won the unpinned resolve.
+Verified end-to-end: real-prompt job -> claim -> generate -> temp-write then
+rename onto the master's NFS export -> valid playable .wav in
+/srv/radio/tracks (params JSON renamed alongside). Measured 1365.55 s per
+30 s clip (Sprint 3 baseline). Ops notes: WSL2 needs 12 GB (default 8 GB
+OOM-killed the worker mid-decode; the bump fixed stability, not step speed);
+NFS from Windows Home = WSL2 kernel mount + `insecure` export option +
+1777 dir; the worker mounts the export INSIDE the container (Docker Desktop
+cannot bind-mount a WSL-side NFS mount); INT4 quantized mode dispatch is
+implemented but upstream's q4-K-M weights repo is unpublished - parked;
+WORKER_TORCH_COMPILE=1 is the available perf experiment.
+
 ## 6. Known risks and open items
 
 **Playlist session boundary.** When the ~6h playlist ends, FFmpeg exits and
@@ -246,15 +277,15 @@ Do not start unless the owner asks; Option A is the Sprint 1 path.
 
 ---
 
-## 8. Next step: finish Day 4 verification, then Day 5
+## 8. Next step: Day 6 - make DELL failure-safe
 
-Day 4 is implemented. Remaining owner verification (on the DELL, per the
-acceptance criteria in `detailed-plan.md` Day 4): run `worker/dell_worker.py`
-on DELL against the master's Redis, push a fake job from the master
-(`./worker/push_test_job.sh`), and confirm the worker claims it exactly once;
-then kill the worker mid-claim and confirm a restart does **not** re-claim the
-orphaned job sitting in `jobs:in_progress`. After that, Day 5 (real
-generation, containerized).
+Implementation plan presented to the owner (2026-09-24), pending approval:
+job leases + a master-side reaper (requeues expired claims), a worker
+/health endpoint, a generation_stats timing table on the master, Redis
+persistence, and the plan's three deliberate failure tests (kill
+mid-generation, cable pull, disk full). Read `detailed-plan.md` Day 6 for
+tasks and acceptance criteria. After Day 6, Sprint 2 closes; Day 7 brings
+the MacBook online.
 
 ---
 
