@@ -81,6 +81,7 @@ docker volume create ace-checkpoints   # persistent model weights
 
 docker run --rm --gpus all --cap-add SYS_ADMIN \
   -e REDIS_URL=redis://192.168.50.1:6379/0 \
+  -e TORCHINDUCTOR_CACHE_DIR=/app/checkpoints/torchinductor \
   -e REDIS_PASSWORD=<from master's .env> \
   -e NFS_SOURCE=192.168.50.1:/srv/radio/tracks \
   -v ace-checkpoints:/app/checkpoints \
@@ -114,7 +115,8 @@ First start takes a while: checkpoint download + model load (logged as
 | `WORKER_MOUNT_NFS` | `1` | set `0` only when TRACKS_DIR is already a mount |
 | `WORKER_CPU_OFFLOAD` | `1` | ACE-Step low-VRAM tier (6 GB RTX 2060) |
 | `WORKER_OVERLAPPED_DECODE` | `1` | same tier |
-| `WORKER_QUANTIZED` | `0` | spec's "INT8" maps to ACE-Step's `quantized` flag; off until quantized-weight auto-download is verified on first run |
+| `WORKER_QUANTIZED` | `0` | `1` = INT4wo weights via the q4-K-M HF repo (see notes) + forced torch.compile. Baseline on the RTX 2060: 1365.55 s per 30 s clip |
+| `WORKER_TORCH_COMPILE` | `0` | non-quantized path only; candidate step-speedup lever |
 
 ## Acceptance tests (Day 5)
 
@@ -130,11 +132,15 @@ First start takes a while: checkpoint download + model load (logged as
 
 ## Known notes / deviations
 
-- `WORKER_QUANTIZED` defaults off: the design spec says INT8 quantization,
-  but whether ACE-Step's quantized checkpoint weights auto-download is not
-  yet verified. Flip to `1` once weights are confirmed; low-VRAM tier with
-  CPU offload works without it (README-reported max 8 GB tier is a lie on a
-  6 GB card, hence offload defaults on).
+- Quantized mode: ACE-Step's source hardcodes REPO_ID_QUANT =
+  "ACE-Step/ACE-Step-v1-3.5B-q4-K-M" with the authors' own comment
+  "# ??? update this i guess". As of 2026-09-23 a Hugging Face org search
+  shows these ACE-Step model repos: 1000feet/ace-step-v1-3.5b, 1231czx/llama32_math_and_ace_rl_step130, 1231czx/llama32_math_and_ace_rl_step160, 2600A/ace-step-v1-5-turbo-lora-dark-cybertrance-v0-71, 3xc3l510r9r4ph1c5sf/acestep-v15-xl-turbo, 6san/symphonic_metal_lora_for_ace-step_v15. The q4 repo check returned an
+  error consistent with a nonexistent repo, so WORKER_QUANTIZED=1 is
+  expected to fail at weight download until upstream publishes it (or we
+  use their export_quantized_weights path). The worker dispatches to the
+  quantized loader correctly (load_quantized_checkpoint) when the flag is
+  on. The spec's "INT8" wording maps to ACE-Step's INT4wo implementation.
 - Job failures are logged, cleaned up, and acked (queue not wedged);
   retry/requeue policy is Day 6.
 - `live`/`filler` priority lanes and worker health heartbeats are later

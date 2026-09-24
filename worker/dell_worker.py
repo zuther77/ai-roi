@@ -222,12 +222,20 @@ class Generator:
         self.pipeline = ACEStepPipeline(
             checkpoint_dir=CHECKPOINT_PATH,
             dtype="bfloat16",
-            torch_compile=False,
+            torch_compile=_env_flag("WORKER_TORCH_COMPILE", "0"),
             cpu_offload=_env_flag("WORKER_CPU_OFFLOAD", "1"),
             overlapped_decode=_env_flag("WORKER_OVERLAPPED_DECODE", "1"),
             quantized=_env_flag("WORKER_QUANTIZED", "0"),
         )
-        self.pipeline.load_checkpoint(self.pipeline.checkpoint_dir)
+        # The pipeline's own lazy-load dispatches on self.quantized, but we
+        # load eagerly (model resident before the first claim), so we must
+        # pick the loader ourselves. The quantized loader pulls INT4
+        # weight-only weights from a separate HF repo (REPO_ID_QUANT, q4-K-M)
+        # and force-enables torch.compile.
+        if _env_flag("WORKER_QUANTIZED", "0"):
+            self.pipeline.load_quantized_checkpoint(self.pipeline.checkpoint_dir)
+        else:
+            self.pipeline.load_checkpoint(self.pipeline.checkpoint_dir)
         log("model_loaded", load_sec=round(time.monotonic() - t0, 1))
 
     def generate(self, prompt: str, duration_sec: float, stem: str) -> tuple[str, float]:
