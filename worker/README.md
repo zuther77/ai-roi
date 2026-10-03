@@ -9,6 +9,15 @@ GPU passthrough).
 
 ## Files
 
+- `base.py` — Day 7 formal `GenerationWorker` interface (ABC),
+  `AudioResult`, typed errors, request validation. Pure stdlib,
+  unit-tested on any machine (`worker/test_base.py`).
+- `macbook_worker.py` — Day 7 `MacBookWorker(GenerationWorker)`: NATIVE on
+  macOS (never Docker — no MLX/MPS passthrough), wraps ACE-Step's pipeline
+  in-process, backend verification (refuses CPU fallback), temp-then-rename
+  output, measured timing.
+- `test_macbook_worker.py` — Day 7 standalone test: malformed requests +
+  one real generation. Runs with plain python on the MacBook.
 - `dell_worker.py` — the worker. Claims jobs with
   `BRPOPLPUSH jobs:pending jobs:in_progress`, generates, writes to a
   temp filename then `os.replace()`s to the final name (atomic on NFS),
@@ -177,6 +186,43 @@ Master-side helpers during the tests:
     docker compose logs -f queue-reaper
     docker compose exec -T redis sh -c 'REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli LLEN jobs:pending'
     python3 -c "import sqlite3; [print(r) for r in sqlite3.connect('queue/generation_stats.db').execute('SELECT * FROM generation_stats')]"
+
+## Day 7 — MacBook worker (native, in isolation)
+
+DEVIATION (owner-flagged 2026-10-03): the spec/plan describe ACE-Step's
+"MLX backend" + an official macOS launch script. At the pinned ACE-Step
+commit (1bee4c9f) neither exists in the repository — verified by search.
+The actual Apple-Silicon path is PyTorch MPS, auto-selected inside
+ACEStepPipeline (with automatic float32 coercion on MPS). The worker
+verifies MPS engagement and treats CPU as a hard BackendError, which meets
+the criterion's intent ("real GPU acceleration, not silent CPU
+fallback"). Model: the same turbo/2B checkpoint as DELL (never the 4B XL
+variant). Native, NOT containerized (Section 3.5's runtime: native |
+container asymmetry is deliberate).
+
+Setup on the MacBook:
+
+    # repos side by side, same layout as master/DELL (both at their pins)
+    git clone https://github.com/ace-step/ACE-Step   # commit 1bee4c9f
+    # ...clone/copy ai-roi beside it...
+    cd ACE-Step && python3 -m venv .venv && source .venv/bin/activate
+    pip install -r requirements.txt        # darwin/arm64 wheels auto-select;
+                                           # do NOT override manually (plan)
+
+Run the test (standalone: no Docker, no queue, no Redis, no stream):
+
+    cd ../ai-roi/worker
+    python3 test_macbook_worker.py
+
+First run downloads the checkpoints (~several GB, once) to
+`~/.cache/ace-step/checkpoints`. Verify in the output: backend `mps`,
+typed exceptions for all malformed cases, real `.wav` in `mac-output/`,
+and the printed `generation_sec` — record it next to DELL's 1365.55 s
+baseline for Day 8's Queue Manager.
+
+Interface unit tests (pure logic, run anywhere):
+
+    cd worker && python3 -m unittest test_base -v
 
 ## Acceptance tests (Day 5)
 
