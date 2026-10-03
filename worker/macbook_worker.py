@@ -47,6 +47,39 @@ WORKER_NAME = "macbook"
 # ACE-Step's own default checkpoint cache; env-overridable.
 CHECKPOINT_PATH = os.environ.get("CHECKPOINT_PATH",
                                  os.path.expanduser("~/.cache/ace-step/checkpoints"))
+
+
+def _ensure_acestep_import() -> None:
+    """Make the pinned ACE-Step checkout importable.
+
+    The worker runs against a clone of ACE-Step beside this repo (the
+    layout on master and DELL), not necessarily a pip-installed package.
+    Order: already-imported > already-importable (e.g. `pip install .`) >
+    ACESTEP_DIR env > the sibling ../ACE-Step checkout.
+    """
+    import sys
+    if "acestep" in sys.modules:
+        return
+    try:
+        import acestep  # noqa: F401  (already importable)
+        return
+    except ImportError:
+        pass
+    candidates = []
+    if os.environ.get("ACESTEP_DIR"):
+        candidates.append(os.environ["ACESTEP_DIR"])
+    # worker/<this file> -> repo root -> sibling ACE-Step
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    candidates.append(os.path.join(os.path.dirname(repo_root), "ACE-Step"))
+    for cand in candidates:
+        if os.path.isdir(os.path.join(cand, "acestep")):
+            sys.path.insert(0, os.path.abspath(cand))
+            log("acestep_path_injected", path=os.path.abspath(cand))
+            return
+    raise WorkerError(
+        "cannot import 'acestep': no pip-installed package and no checkout "
+        "found. Either `pip install .` inside the ACE-Step checkout, or "
+        "place/symlink it beside this repo, or set ACESTEP_DIR.")
 # Local output dir (Day 7 is isolated: no NFS, no queue, no stream).
 OUTPUT_DIR = os.environ.get("MACBOOK_OUTPUT_DIR", "mac-output")
 
@@ -87,6 +120,7 @@ class MacBookWorker(GenerationWorker):
         if self._pipeline is not None:
             return self._backend
 
+        _ensure_acestep_import()
         from acestep.pipeline_ace_step import ACEStepPipeline
 
         t0 = time.monotonic()
