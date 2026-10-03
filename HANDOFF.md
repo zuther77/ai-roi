@@ -16,9 +16,11 @@ machine-verified in Docker; **owner-verified on DELL 2026-09-22**
 2026-09-24: real-prompt job claimed on DELL, generated, atomically
 temp-then-renamed onto the master's NFS export, playable .wav verified on
 the master. Measured on the RTX 2060 (cpu_offload tier): **1365.55 s per
-30 s clip** - the Sprint 3 timing baseline. **Day 6 not started** -
-failure-safety plan presented to the owner, implementation pending
-approval.
+30 s clip** - the Sprint 3 timing baseline. **Day 6 complete and owner-verified** (2026-10-03): all three deliberate
+failure tests (kill mid-generation, cable pull, disk-full) plus /health
+checks passed. **Sprint 2 closes**: DELL is a proven, failure-safe
+generation worker. **Day 7 (MacBook as a second worker) is next** - not
+started.
 
 ---
 
@@ -253,6 +255,23 @@ cannot bind-mount a WSL-side NFS mount); INT4 quantized mode dispatch is
 implemented but upstream's q4-K-M weights repo is unpublished - parked;
 WORKER_TORCH_COMPILE=1 is the available perf experiment.
 
+### Day 6 - complete, verified by the owner (2026-10-03)
+Job leases (job:lease:<job_id>, TTL = target x 50 x WORKER_LEASE_MULTIPLIER,
+env-tunable so failure tests can use short leases) + a queue-reaper Compose
+service on the master (restart: always): scans jobs:in_progress every 30 s,
+requeues lease-expired jobs (LREM-first, race-safe against simultaneous
+acks), and drains generation:stats into queue/generation_stats.db
+(master-local SQLite; no DB writes over NFS). Worker /health on :8001
+(FastAPI thread, x-worker-secret header auth, starts before model load so
+"starting" is observable). Redis persistence: appendonly + named volume -
+the queue now survives a Redis restart. queue/status.sh one-glance helper.
+Unit tests 11/11 in Docker; lease logic verified both directions. A real
+run produced the first production stat row: 1400.3 s for a 30 s clip.
+The plan's "multiplier too tight" pitfall was demonstrated live: a job run
+with the 30 s failure-test lease was requeued by the reaper while the
+worker was still generating (expected trade-off; production default 3
+cannot hit it).
+
 ## 6. Known risks and open items
 
 **Playlist session boundary.** When the ~6h playlist ends, FFmpeg exits and
@@ -277,15 +296,13 @@ Do not start unless the owner asks; Option A is the Sprint 1 path.
 
 ---
 
-## 8. Next step: Day 6 - make DELL failure-safe
+## 8. Next step: Day 7 - MacBook as a second worker, in isolation
 
-Implementation plan presented to the owner (2026-09-24), pending approval:
-job leases + a master-side reaper (requeues expired claims), a worker
-/health endpoint, a generation_stats timing table on the master, Redis
-persistence, and the plan's three deliberate failure tests (kill
-mid-generation, cable pull, disk full). Read `detailed-plan.md` Day 6 for
-tasks and acceptance criteria. After Day 6, Sprint 2 closes; Day 7 brings
-the MacBook online.
+Read `detailed-plan.md` Day 7 for tasks and acceptance criteria: the formal
+GenerationWorker interface, MacBookWorker running NATIVELY (no Docker on
+Apple Silicon - no MLX passthrough), the same turbo/2B model as DELL, a
+standalone no-queue test script, and real comparative timing data for the
+Day 8 Queue Manager. Sprint 2 is closed; Day 8 follows Day 7.
 
 ---
 
