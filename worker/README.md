@@ -85,9 +85,17 @@ Two images since the migration — theirs (the model) and ours (the worker):
 
 ```sh
 # 1. ACE-Step 1.5's own image, from their pinned checkout on DELL
-#    (ace-step/ACE-Step-1.5 @ ca1e85fe — keep the copy at that commit)
+#    (ace-step/ACE-Step-1.5 @ ca1e85fe — keep the copy at that commit.
+#    NOT ace-step/ACE-Step — the old Sprint 2 repo builds a Python 3.10 /
+#    gui.py image that ignores ACESTEP_MODE and ships mismatched torch.)
 cd <path-to>/ACE-Step-1.5
+git rev-parse HEAD          # must print ca1e85fe94301...
 docker build -t acestep15 .
+
+# Litmus test — the right image answers ALL of these:
+#   * banner "ACE-Step 1.5", "Mode : api"
+#   * Python 3.11, PyTorch 2.10.0+cu128
+#   /opt/venv ... python3.10 ... gui.py means you built the OLD repo.
 
 # 2. Our slim worker image, from THIS repo
 cd <path-to>/ai-roi
