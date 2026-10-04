@@ -21,10 +21,10 @@ container there is still no reason to add a pip dependency for ~5 commands.
 
 Environment (all set at `docker run` time, see worker/README.md):
 
-    REDIS_URL              default redis://192.168.50.1:6379/0
+    REDIS_URL              default redis://192.168.1.210:6379/0
     REDIS_PASSWORD         required (master's .env)
     TRACKS_DIR             default /app/tracks (mounted from NFS_SOURCE below)
-    NFS_SOURCE             default 192.168.50.1:/srv/radio/tracks - the master's
+    NFS_SOURCE             default 192.168.1.210:/srv/radio/tracks - the master's
                            export, mounted INSIDE the container at startup
                            (Docker Desktop cannot pass a WSL NFS mount through
                            as a bind mount)
@@ -73,11 +73,11 @@ CLAIM_TIMEOUT_SEC = 5
 EXPECTED_SEC_PER_TARGET_SEC = int(os.environ.get("WORKER_EXPECTED_PER_TARGET_SEC", "50"))
 LEASE_MULTIPLIER = float(os.environ.get("WORKER_LEASE_MULTIPLIER", "3"))
 
-DEFAULT_REDIS_URL = "redis://192.168.50.1:6379/0"
+DEFAULT_REDIS_URL = "redis://192.168.1.210:6379/0"
 
 ACESTEP_API_URL = os.environ.get("ACESTEP_API_URL", "http://127.0.0.1:8001")
 TRACKS_DIR = os.environ.get("TRACKS_DIR", "/app/tracks")
-NFS_SOURCE = os.environ.get("NFS_SOURCE", "192.168.50.1:/srv/radio/tracks")
+NFS_SOURCE = os.environ.get("NFS_SOURCE", "192.168.1.210:/srv/radio/tracks")
 
 
 def _env_flag(name: str, default: str = "0") -> bool:
@@ -119,7 +119,7 @@ class MiniRedis:
 
     def __init__(self, url: str, password: str):
         parsed = urlparse(url)
-        self.host = parsed.hostname or "192.168.50.1"
+        self.host = parsed.hostname or "192.168.1.210"
         self.port = parsed.port or 6379
         self.db = int((parsed.path or "/0").strip("/") or 0)
         self.password = unquote(parsed.password) if parsed.password else password

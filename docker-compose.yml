@@ -79,11 +79,16 @@ services:
     command: >
       sh -c 'exec redis-server --requirepass "$$REDIS_PASSWORD" --appendonly yes'
 
-    # Published on the direct-link IP only — never 0.0.0.0. The DELL (.2)
-    # and the master itself can reach it; the general home LAN cannot
-    # (spec Section 3.5). If the 192.168.50.1 interface is down, Compose
-    # fails to bind this port — that is deliberate, not a bug.
+    # Published on specific interfaces — never 0.0.0.0 (spec v0.4.1):
+    #   * LAN/Wi-Fi (192.168.1.210) — the normative worker network since
+    #     the 2026-10-04 owner decision: EVERY worker, any OS, reaches
+    #     Redis here. requirepass is mandatory; reachable-from-LAN is by
+    #     design (see design-spec Section 3.5 networking).
+    #   * Legacy direct link (192.168.50.1) — NIC still configured; kept
+    #     until the link is physically retired.
+    # Binding fails if an interface is down — deliberate, not a bug.
     ports:
+      - "192.168.1.210:6379:6379"
       - "192.168.50.1:6379:6379"
 
     # Day 6: queue persistence. appendonly + a named volume so pending and

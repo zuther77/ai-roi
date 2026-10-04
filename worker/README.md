@@ -37,9 +37,51 @@ stdlib-only client.
   ACE-Step-1.5's own Dockerfile (see Build below).
 - `push_test_job.sh` — master-side fake-job push (Day 4, unchanged).
 
+## Worker networking & setup (any OS — 2026-10-04 owner decision, spec v0.4.1)
+
+All workers — Windows, macOS, Linux — connect over the **regular home
+LAN/Wi-Fi**. The DELL direct-link design is retired (the old
+192.168.50.0/24 config may remain physically in place; nothing depends on
+it). Master's LAN address: **192.168.1.210** (give the master a DHCP
+reservation too — workers point at it).
+
+One-time prerequisites (owner):
+1. Router **DHCP reservations**: master `.210`, DELL `.51`,
+   MacBook `.50` on `192.168.1.0/24` — any stable scheme works; if you
+   pick different addresses, update this README and `.env.example`.
+2. Master NFS export for the workers' reserved IPs (clause below) +
+   `sudo exportfs -ra`.
+3. `docker compose up -d` on the master — Redis then publishes on the LAN
+   address (`requirepass` unchanged). NOTE: reachable-from-LAN is by
+   design; the password is the boundary (spec v0.4.1). Never 0.0.0.0.
+4. Worker connectivity check: `nc -vz 192.168.1.210 6379`.
+5. The legacy `insecure` export option stays: WSL2 (Windows worker) NAT
+   remaps the NFS client's source port on **any** network, not just the
+   old link.
+
+### Windows worker (the proven DELL path — WSL2 + Docker Desktop)
+Connect via normal Wi-Fi/Ethernet — the direct cable is no longer needed
+(keep or unplug it, both fine). Then follow **Build** and **Run** below;
+Redis URL + NFS source are the master's LAN address. The WSL2 quirks
+documented in Run (in-container NFS mount, `--cap-add SYS_ADMIN`) apply
+identically over Wi-Fi.
+
+### macOS worker (native — MLX)
+Connect via Wi-Fi (reserved IP). macOS ships an NFS client:
+    sudo mkdir -p /mnt/radio-tracks
+    sudo mount_nfs 192.168.1.210:/srv/radio/tracks /mnt/radio-tracks
+(If the mount is refused, retry with `-o resvport`.) Generation runs
+natively via ACE-Step-1.5's `start_api_server_macos.sh` (Day 7 section);
+the Mac's queue-side claim runner arrives with Day 8.
+
+### Linux worker
+Connect via Wi-Fi/Ethernet (reserved IP). Use native Docker (no
+Docker-Desktop-specific quirks: the WSL2 automount timeout does not
+apply) — same Build + Run flow with local paths.
+
 ## Prerequisites (master side)
 
-Redis is up (`192.168.50.1:6379`, Compose service). The NFS server must be
+Redis is up (`192.168.1.210:6379`, Compose service). The NFS server must be
 installed and exporting on the master (owner-run once, needs sudo):
 
 ```sh
@@ -50,7 +92,11 @@ sudo mkdir -p /srv/radio/tracks
 sudo chmod 1777 /srv/radio/tracks
 # `insecure` is required: WSL2's NAT remaps the NFS client's source port to
 # an unprivileged one, and nfsd rejects non-privileged ports without it.
+# legacy direct-link client (kept until the link is physically retired)
 echo '/srv/radio/tracks 192.168.50.2(rw,sync,no_subtree_check,insecure)' | sudo tee -a /etc/exports
+# LAN/Wi-Fi workers (spec v0.4.1): each worker's RESERVED IP explicitly —
+# never the whole subnet. .51 = DELL, .50 = MacBook (match your reservations).
+echo '/srv/radio/tracks 192.168.1.50 192.168.1.51(rw,sync,no_subtree_check,insecure)' | sudo tee -a /etc/exports
 sudo exportfs -ra
 ```
 
@@ -66,7 +112,7 @@ master all work.
 # for manual inspection from WSL (and works natively - Windows Home's lack
 # of "Services for NFS" is irrelevant on this route):
 sudo mkdir -p /mnt/radio-tracks
-sudo mount -t nfs 192.168.50.1:/srv/radio/tracks /mnt/radio-tracks  # optional
+sudo mount -t nfs 192.168.1.210:/srv/radio/tracks /mnt/radio-tracks  # optional
 
 # GPU sanity check (plan Day 5 task 3)
 docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi
@@ -135,10 +181,10 @@ docker logs -f acestep            # first start: checkpoint download + init;
 docker run --rm --gpus all --cap-add SYS_ADMIN --network radio-net \
   --name ai-roi-worker \
   -p 8001:8001 \
-  -e REDIS_URL=redis://192.168.50.1:6379/0 \
+  -e REDIS_URL=redis://192.168.1.210:6379/0 \
   -e REDIS_PASSWORD=<from master's .env> \
   -e WORKER_SHARED_SECRET=<from master's .env> \
-  -e NFS_SOURCE=192.168.50.1:/srv/radio/tracks \
+  -e NFS_SOURCE=192.168.1.210:/srv/radio/tracks \
   -e ACESTEP_API_URL=http://acestep:8001 \
   -v <path-to>/ai-roi/worker:/app/worker:ro \
   ai-roi-worker
@@ -163,11 +209,11 @@ Notes:
 
 | Env var | Default | Notes |
 |---|---|---|
-| `REDIS_URL` | `redis://192.168.50.1:6379/0` | master's direct-link IP |
+| `REDIS_URL` | `redis://192.168.1.210:6379/0` | master's LAN address (spec v0.4.1) |
 | `REDIS_PASSWORD` | — | required, from master's `.env` |
 | `ACESTEP_API_URL` | `http://127.0.0.1:8001` | the acestep15 server; on DELL use `http://acestep:8001` (docker network) |
 | `TRACKS_DIR` | `/app/tracks` | mount point for NFS_SOURCE, atomic rename target |
-| `NFS_SOURCE` | `192.168.50.1:/srv/radio/tracks` | master's export, mounted inside the container at startup |
+| `NFS_SOURCE` | `192.168.1.210:/srv/radio/tracks` | master's export, mounted inside the container at startup |
 | `WORKER_MOUNT_NFS` | `1` | set `0` only when TRACKS_DIR is already a mount |
 | *(model tier envs)* | — | WORKER_CPU_OFFLOAD / OVERLAPPED_DECODE / QUANTIZED / TORCH_COMPILE are gone since the migration: the turbo tier, INT8 and offload now live in the **acestep15** container's env (ACESTEP_CONFIG_PATH etc.) — see notes |
 | `WORKER_SHARED_SECRET` | — | from master's .env; required by /health (x-worker-secret header) |
@@ -195,7 +241,7 @@ job.
 
 Health check (from the master or DELL):
 
-    curl -m 5 -H "x-worker-secret: <WORKER_SHARED_SECRET>" http://192.168.50.2:8001/health
+    curl -m 5 -H "x-worker-secret: <WORKER_SHARED_SECRET>" http://192.168.1.51:8001/health
 
 `{"status": "ok", "gpu_available": true, "model_loaded": true}` once
 ready; `"starting"` during model load; refused/timeout when the container

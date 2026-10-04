@@ -26,7 +26,10 @@ start_api_server_macos.sh; DELL is ~3x that speed when it works).
 **DELL is parked by owner decision** (2026-10-04): its 1.5 re-baseline
 needs the <=6 GB VAE decode fix (ACESTEP_VAE_ON_CPU=1 +
 ACESTEP_VAE_DECODE_CHUNK_SIZE=512, in worker/README.md) but is deferred;
-we circle back later. **Day 8 (minimal Queue Manager) is next**.
+we circle back later. **Day 8 (minimal Queue Manager) is next**. Networking revision
+(2026-10-04, owner): the direct Ethernet link is RETIRED — every worker,
+any OS, connects over the regular LAN/Wi-Fi (spec v0.4.1; master on the
+LAN at 192.168.1.210, workers reserved on 192.168.1.0/24).
 
 ---
 
@@ -51,8 +54,8 @@ keeps broadcasting from its local filler pool.
 
 | Role | Machine | Notes |
 |------|---------|--------|
-| **Master** | **Linux** (production box) | From Sprint 2 onward. Docker Engine + Compose. Owns playout, Redis, NFS, Queue Manager. Direct Ethernet to DELL on `192.168.50.0/24` (master `.1`, DELL `.2`). Separate interface/Wi‑Fi for internet / YouTube RTMP. |
-| **Worker — DELL** | DELL laptop (RTX 2060) | Generation worker; direct link only for master↔DELL. |
+| **Master** | **Linux** (production box) | From Sprint 2 onward. Docker Engine + Compose. Owns playout, Redis, NFS, Queue Manager. On the home LAN at **192.168.1.210** — the worker network (spec v0.4.1, 2026-10-04: every worker, any OS, connects via LAN/Wi-Fi; the old direct link `192.168.50.0/24` remains configured but optional). Same interface carries internet / YouTube RTMP. |
+| **Worker — DELL** | DELL laptop (RTX 2060) | Generation worker (1.5 re-baseline parked, fix in worker/README); connects via LAN/Wi-Fi like every worker (direct link retired 2026-10-04). |
 | **Worker / portable — MacBook** | MacBook Air M4 | No longer the master. Remains the Apple Silicon worker (native ACE-Step/MLX) on the home LAN later; can still be used to edit code and push to GitHub. |
 
 Sprint 1 was developed and verified with the MacBook as temporary master
@@ -69,8 +72,10 @@ Desktop networking or macOS-as-NFS-server.
 3. `docker compose up -d --build` and confirm filler stream still reaches
    YouTube (Sprint 1 regression).
 4. Optional: enable `deploy/radio-stack.service` so compose starts on boot.
-5. Cable master↔DELL; static IPs `192.168.50.1` / `.2`; ping both ways; confirm
-   master internet still works on the other interface.
+5. ~~Cable master↔DELL; static IPs `192.168.50.1` / `.2`~~ — done in
+   Sprint 2 and verified; RETIRED by the 2026-10-04 networking decision
+   (spec v0.4.1). See `worker/README.md` for the LAN/Wi-Fi worker setup,
+   per OS.
 
 ---
 
