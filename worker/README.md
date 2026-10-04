@@ -112,8 +112,21 @@ docker network create radio-net        # the two containers talk to each other
 docker run -d --name acestep --gpus all --network radio-net \
   -e ACESTEP_MODE=api \
   -e ACESTEP_CONFIG_PATH=acestep-v15-turbo \
+  -e ACESTEP_VAE_ON_CPU=1 \
+  -e ACESTEP_VAE_DECODE_CHUNK_SIZE=512 \
   -v ace-checkpoints:/app/checkpoints \
   acestep15
+
+# The two ACESTEP_VAE_* vars are the <=6 GB decode fix, live-verified as
+# needed on the RTX 2060 (2026-10-04): without them the turbo diffusion
+# runs fine (~2 s) but the VAE decode hits a 0.17 GB free-VRAM crisis,
+# falls back to CPU decode at a tiny auto chunk (128, overlap 32) and
+# stalls for minutes with no log output. Pre-declaring CPU decode + the
+# max chunk (512; their constant) makes decode fast and cheap on CPU
+# (16 GB host RAM) instead of a crisis fallback. Note:
+# ACESTEP_SAVE_MEMORY looks like a VRAM tier switch but is NOT - their
+# docstring: host-RAM intermediates only. The INT8 tier itself is
+# auto-detected from VRAM (gpu_config.py); there is no CLI/init flag.
 docker logs -f acestep            # first start: checkpoint download + init;
                                   # the banner prints CUDA/GPU availability —
                                   # THAT is the GPU attestation line to check
