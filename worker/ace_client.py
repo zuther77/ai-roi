@@ -47,16 +47,32 @@ def _log(event: str, **fields) -> None:
                       "event": event, **fields}), flush=True)
 
 
+AUDIO_EXTS = (".wav", ".mp3", ".flac", ".ogg")
+
+
 def extract_audio_path(node) -> str | None:
     """Recursively walk a query_result item for an audio file path.
 
-    Handles nested dicts, lists, and JSON-encoded strings (their local
-    cache stores items as serialized JSON). Returns the first string
-    that looks like an audio path.
+    ACE-Step 1.5's terminal items embed a FETCH URL rather than a bare
+    path: "/v1/audio?path=/Users/.../track.mp3" (sometimes with the inner
+    path percent-encoded — verified live on the Mac, which hit HTTP 403
+    when the raw URL was sent back as the path). So: unwrap any path=
+    parameter first, decode percent-encoding to a fixed point, THEN check
+    the audio suffix. In both our deployments the unwrapped path is on
+    the same machine as the server, so fetch_track direct-copies it and
+    the /v1/audio route is never even used.
     """
     if isinstance(node, str):
-        if any(node.lower().endswith(ext) for ext in (".wav", ".mp3", ".flac", ".ogg")):
-            return node
+        candidate = node
+        if "path=" in candidate:
+            candidate = candidate.split("path=", 1)[1].split("&", 1)[0]
+        for _ in range(4):  # decode to a fixed point (handles double-encoding)
+            decoded = urllib.parse.unquote(candidate)
+            if decoded == candidate:
+                break
+            candidate = decoded
+        if any(candidate.lower().endswith(ext) for ext in AUDIO_EXTS):
+            return candidate
         if node.startswith("{") or node.startswith("["):
             try:
                 return extract_audio_path(json.loads(node))
@@ -67,11 +83,12 @@ def extract_audio_path(node) -> str | None:
         for key, value in node.items():
             lowered = str(key).lower()
             if isinstance(value, str) and any(
-                    value.lower().endswith(e) for e in (".wav", ".mp3", ".flac", ".ogg")):
-                return value
+                    value.lower().endswith(e) for e in AUDIO_EXTS):
+                found = extract_audio_path(value)  # unwrap embedded URLs too
+                return found or value
             if lowered in ("audio", "audio_path", "audio_url", "path",
                            "file", "filename", "url") and isinstance(value, str) and value:
-                return value
+                return extract_audio_path(value) or value
             found = extract_audio_path(value)
             if found:
                 return found
