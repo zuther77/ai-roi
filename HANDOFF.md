@@ -28,8 +28,12 @@ needs the <=6 GB VAE decode fix (ACESTEP_VAE_ON_CPU=1 +
 ACESTEP_VAE_DECODE_CHUNK_SIZE=512, in worker/README.md) but is deferred;
 we circle back later. **Day 8 (minimal Queue Manager) is next**. Networking revision
 (2026-10-04, owner): the direct Ethernet link is RETIRED — every worker,
-any OS, connects over the regular LAN/Wi-Fi (spec v0.4.1; master on the
-LAN at 192.168.1.210, workers reserved on 192.168.1.0/24).
+any OS, connects over the regular LAN/Wi-Fi (spec v0.4.1). v0.4.2 (same
+day): NO router reservations — the master alone is fixed at the OS level
+(nmcli, worker/setup.md Step 2); workers run plain DHCP and self-register;
+the NFS export is LAN-subnet-wide (owner-accepted tradeoff: the project
+targets single-household Wi-Fi; root_squash + 1777 confine exposure to
+junk in the tracks dir).
 
 ---
 
@@ -54,7 +58,7 @@ keeps broadcasting from its local filler pool.
 
 | Role | Machine | Notes |
 |------|---------|--------|
-| **Master** | **Linux** (production box) | From Sprint 2 onward. Docker Engine + Compose. Owns playout, Redis, NFS, Queue Manager. On the home LAN at **192.168.1.210** — the worker network (spec v0.4.1, 2026-10-04: every worker, any OS, connects via LAN/Wi-Fi; the old direct link `192.168.50.0/24` remains configured but optional). Same interface carries internet / YouTube RTMP. |
+| **Master** | **Linux** (production box) | From Sprint 2 onward. Docker Engine + Compose. Owns playout, Redis, NFS, Queue Manager. On the home LAN at **192.168.1.210** — the worker network (spec v0.4.1+v0.4.2, 2026-10-04: every worker, any OS, connects via LAN/Wi-Fi over plain DHCP; the old direct link `192.168.50.0/24` remains configured but optional). Same interface carries internet / YouTube RTMP. |
 | **Worker — DELL** | DELL laptop (RTX 2060) | Generation worker (1.5 re-baseline parked, fix in worker/README); connects via LAN/Wi-Fi like every worker (direct link retired 2026-10-04). |
 | **Worker / portable — MacBook** | MacBook Air M4 | No longer the master. Remains the Apple Silicon worker (native ACE-Step/MLX) on the home LAN later; can still be used to edit code and push to GitHub. |
 

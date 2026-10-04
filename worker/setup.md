@@ -7,14 +7,15 @@ file appears on the master, the worker has everything the radio needs:
 generation output lands in the master's `/srv/radio/tracks` exactly the
 same way. Budget ~10 minutes, one time per worker.
 
-Addresses used in this guide (match your router reservations; if yours
-differ, substitute everywhere):
+Addressing (spec v0.4.2 — near-zero bookkeeping):
 
 | Machine | Address | Notes |
 |---|---|---|
-| Master (Linux box) | `192.168.1.210` | Wi-Fi/LAN; reserve it too |
-| DELL worker | `192.168.1.51` | Windows Home + WSL2 |
-| MacBook worker | `192.168.1.50` | native macOS |
+| Master (Linux box) | `192.168.1.210` | static, set at the OS level (Step 2) |
+| Any worker | plain DHCP | workers are never referenced by address — they connect to the master and self-register (worker registry); no router configuration for anyone |
+
+One address in the whole system: the master's. Everything below assumes
+it; substitute if you choose a different one.
 
 ---
 
@@ -27,11 +28,20 @@ ip -4 -brief addr        # the Wi-Fi/LAN interface should show 192.168.1.210/24
 ip route                 # default via 192.168.1.1 — that's your home router
 ```
 
-**Step 2 — Reserve every machine's IP on the router.** In your router's
-admin page, bind: master → `.210`, each worker → a fixed address
-(`.51` DELL, `.50` MacBook, or your own scheme). The export and the
-worker configs all point at fixed addresses — reservations are what makes
-this survive reboots.
+**Step 2 — Fix the master's address at the OS level (no router).** The
+architecture is pull-based: workers connect TO the master (Redis, NFS)
+and self-register, so a worker's own address never matters. Only the
+master needs to be stable:
+
+```sh
+nmcli con show --active                  # note your Wi-Fi connection name
+nmcli con mod "<your-wifi-connection>" ipv4.method manual \
+  ipv4.addresses 192.168.1.210/24 ipv4.gateway 192.168.1.1 ipv4.dns 192.168.1.1
+nmcli con up "<your-wifi-connection>"
+ip -4 -brief addr                        # confirm it now holds .210
+```
+
+(The GUI equivalent: Settings -> Wi-Fi -> your network -> IPv4 -> Manual.)
 
 **Step 3 — Install and configure the NFS server** (skip the install line
 if already done — it is on this master):
@@ -49,19 +59,21 @@ delete each other's files:
 sudo chmod 1777 /srv/radio/tracks
 ```
 
-**Step 4 — Export the directory to each worker's RESERVED IP** (never
-the whole subnet — unrelated LAN devices must not be able to mount it).
-Check what is already exported first:
+**Step 4 — Export the directory to the LAN.** Check what is already
+exported first:
 
 ```sh
 cat /etc/exports
 ```
 
-If the LAN line for your workers is missing, add it (`.51` = DELL,
-`.50` = MacBook; any new worker = add its reserved IP to the same list):
+Export to the **whole LAN subnet** — accepted by the owner (2026-10-04,
+spec v0.4.2): this system targets single-household Wi-Fi, root_squash +
+the 1777 directory confine any LAN device to at most writing junk into
+tracks, and no new-worker bookkeeping ever happens. Add the line if your
+`/etc/exports` lacks one for the LAN:
 
 ```sh
-echo '/srv/radio/tracks 192.168.1.50 192.168.1.51(rw,sync,no_subtree_check,insecure)' | sudo tee -a /etc/exports
+echo '/srv/radio/tracks 192.168.1.0/24(rw,sync,no_subtree_check,insecure)' | sudo tee -a /etc/exports
 sudo exportfs -ra
 ```
 
@@ -85,8 +97,7 @@ have one blocking LAN by default):
 ```sh
 sudo ufw status
 # if "active", allow the workers' IPs:
-sudo ufw allow from 192.168.1.51 to any port 2049
-sudo ufw allow from 192.168.1.50 to any port 2049
+sudo ufw allow from 192.168.1.0/24 to any port 2049
 ```
 
 The master side is done. Leave Redis to `docker compose up -d` as usual —
@@ -184,10 +195,10 @@ temp-write-then-`rename()` pattern — see `worker/README.md`).
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `access denied by server while mounting` | Client IP not in `/etc/exports`, `insecure` missing, or `exportfs -ra` not run | Add the worker's reserved IP to the export line with `insecure`, re-export; re-check with `showmount -e` |
+| `access denied by server while mounting` | LAN-subnet export line missing, `insecure` missing, or `exportfs -ra` not run | Add the `192.168.1.0/24` line with `insecure`, re-export; re-check with `showmount -e` |
 | `bad option; ... need a /sbin/mount.<type> helper` | `nfs-common` not installed (classic WSL2 first attempt) | `sudo apt-get install -y nfs-common` |
 | `mount.nfs: Connection timed out` | Wrong IP, worker on a different subnet/VLAN (guest Wi-Fi), or firewall | `ping 192.168.1.210`, check router isolation settings ("AP/client isolation" off), Step 6 firewall rules |
 | `Permission denied` on write | `/srv/radio/tracks` not `1777` on the master | `sudo chmod 1777 /srv/radio/tracks` (root_squash is fine *because* 1777 absorbs uid differences) |
 | macOS `mount_nfs` refused | privileged-port requirement | retry with `-o resvport` |
-| Mounted yesterday, `Stale file handle` today | Worker's IP changed (no reservation) | Fix the router reservation; re-mount |
+| Mounted earlier, `Stale file handle` now | Server re-exported (`exportfs -ra`) or rebooted underneath the mount | Re-run the mount command |
 | Docker: `timed out waiting ... to be automounted` | Docker Desktop WSL2 cannot pass a WSL-side NFS path into containers — a Windows-specific quirk, not a broken setup | The machine mount above stays for manual use; containers mount the export themselves (runbook in `worker/README.md`) |

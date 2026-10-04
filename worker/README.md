@@ -37,19 +37,21 @@ stdlib-only client.
   ACE-Step-1.5's own Dockerfile (see Build below).
 - `push_test_job.sh` — master-side fake-job push (Day 4, unchanged).
 
-## Worker networking & setup (any OS — 2026-10-04 owner decision, spec v0.4.1)
+## Worker networking & setup (any OS — 2026-10-04 owner decision, spec v0.4.1+v0.4.2)
 
 All workers — Windows, macOS, Linux — connect over the **regular home
 LAN/Wi-Fi**. The DELL direct-link design is retired (the old
 192.168.50.0/24 config may remain physically in place; nothing depends on
-it). Master's LAN address: **192.168.1.210** (give the master a DHCP
-reservation too — workers point at it).
+it). Master's LAN address: **192.168.1.210** (static, set at the OS level —
+`setup.md` Step 2; no router configuration; workers run plain DHCP and
+self-register, so their addresses are never tracked).
 
 One-time prerequisites (owner):
-1. Router **DHCP reservations**: master `.210`, DELL `.51`,
-   MacBook `.50` on `192.168.1.0/24` — any stable scheme works; if you
-   pick different addresses, update this README and `.env.example`.
-2. Master NFS export for the workers' reserved IPs (clause below) +
+1. Fix the **master's** address at the OS level (no router): see
+   `worker/setup.md` Step 2 (`nmcli`). Workers need no address setup —
+   the architecture is pull-based and the worker registry learns their
+   addresses at runtime (spec v0.4.2).
+2. Master NFS export to the LAN subnet (clause below) +
    `sudo exportfs -ra`.
 3. `docker compose up -d` on the master — Redis then publishes on the LAN
    address (`requirepass` unchanged). NOTE: reachable-from-LAN is by
@@ -67,7 +69,7 @@ documented in Run (in-container NFS mount, `--cap-add SYS_ADMIN`) apply
 identically over Wi-Fi.
 
 ### macOS worker (native — MLX)
-Connect via Wi-Fi (reserved IP). macOS ships an NFS client:
+Connect via Wi-Fi (plain DHCP is fine). macOS ships an NFS client:
     sudo mkdir -p /mnt/radio-tracks
     sudo mount_nfs 192.168.1.210:/srv/radio/tracks /mnt/radio-tracks
 (If the mount is refused, retry with `-o resvport`.) Generation runs
@@ -75,7 +77,7 @@ natively via ACE-Step-1.5's `start_api_server_macos.sh` (Day 7 section);
 the Mac's queue-side claim runner arrives with Day 8.
 
 ### Linux worker
-Connect via Wi-Fi/Ethernet (reserved IP). Use native Docker (no
+Connect via Wi-Fi/Ethernet (plain DHCP is fine). Use native Docker (no
 Docker-Desktop-specific quirks: the WSL2 automount timeout does not
 apply) — same Build + Run flow with local paths.
 
@@ -94,9 +96,10 @@ sudo chmod 1777 /srv/radio/tracks
 # an unprivileged one, and nfsd rejects non-privileged ports without it.
 # legacy direct-link client (kept until the link is physically retired)
 echo '/srv/radio/tracks 192.168.50.2(rw,sync,no_subtree_check,insecure)' | sudo tee -a /etc/exports
-# LAN/Wi-Fi workers (spec v0.4.1): each worker's RESERVED IP explicitly —
-# never the whole subnet. .51 = DELL, .50 = MacBook (match your reservations).
-echo '/srv/radio/tracks 192.168.1.50 192.168.1.51(rw,sync,no_subtree_check,insecure)' | sudo tee -a /etc/exports
+# LAN/Wi-Fi workers (spec v0.4.2, owner-accepted tradeoff): whole subnet —
+# this project targets single-household Wi-Fi; root_squash + the 1777 dir
+# confine any LAN device to writing junk into tracks at worst.
+echo '/srv/radio/tracks 192.168.1.0/24(rw,sync,no_subtree_check,insecure)' | sudo tee -a /etc/exports
 sudo exportfs -ra
 ```
 
