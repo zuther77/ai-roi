@@ -1,12 +1,14 @@
 """DELL generation worker — Day 5 (detailed-plan Day 5, tasks 4-7).
 
-Runs inside the worker container (worker/Dockerfile, extending
-ace-step/ACE-Step's image). Queue behavior is the Day 4 skeleton, owner-
+Runs inside the worker container (worker/Dockerfile). Since the
+ACE-Step 1.5 migration this is a SLIM wrapper around the ACE-Step 1.5
+API server (see ace_client.py) - no model code lives here. Queue
+behavior is the Day 4 skeleton, owner-
 verified on this machine: atomic claim via BRPOPLPUSH jobs:pending ->
 jobs:in_progress, acknowledge via LREM. Day 5 adds the real work:
 
-  * the ACE-Step 1.5 pipeline is constructed and its checkpoint loaded ONCE
-    at container startup and kept resident (plan pitfall: never load per job)
+  * the ACE-Step 1.5 API server (its own container, acestep15) owns the
+    pipeline, checkpoints and GPU (plan pitfall honored server-side)
   * on each claimed job: generate for prompt/target_duration_sec, write to a
     temp filename on the shared NFS mount, then os.replace() to the final
     name only once the write is complete (design spec Section 3.5, job flow
@@ -21,7 +23,6 @@ Environment (all set at `docker run` time, see worker/README.md):
 
     REDIS_URL              default redis://192.168.50.1:6379/0
     REDIS_PASSWORD         required (master's .env)
-    CHECKPOINT_PATH        default /app/checkpoints (bind-mounted, persistent)
     TRACKS_DIR             default /app/tracks (mounted from NFS_SOURCE below)
     NFS_SOURCE             default 192.168.50.1:/srv/radio/tracks - the master's
                            export, mounted INSIDE the container at startup
@@ -33,11 +34,11 @@ Environment (all set at `docker run` time, see worker/README.md):
     WORKER_HEALTH_PORT     default 8001
     WORKER_LEASE_MULTIPLIER default 3 - generous per the plan's pitfall;
                            shrink (e.g. 0.02) for Day 6 failure tests
-    WORKER_CPU_OFFLOAD     default 1  — ACE-Step low-VRAM tier
-    WORKER_OVERLAPPED_DECODE default 1 — same tier
-    WORKER_QUANTIZED       default 0  — spec maps its "INT8" wording to this
-                           flag; left off until quantized checkpoint weights
-                           are verified to auto-download on first run
+    ACESTEP_API_URL       default http://127.0.0.1:8001 - the ACE-Step
+                           1.5 API server this worker wraps. Model
+                           config (turbo tier, quantization,
+                           torch.compile) moved to THAT container's
+                           env; see worker/README.md
 
 Job schema (Day 4): {"job_id", "prompt", "target_duration_sec",
 "priority", "created_at"}.
@@ -55,6 +56,8 @@ import sys
 import threading
 import time
 from datetime import datetime, timezone
+
+from ace_client import AceStepClient, extract_audio_path
 from urllib.parse import unquote, urlparse
 
 PENDING_KEY = "jobs:pending"
@@ -72,7 +75,7 @@ LEASE_MULTIPLIER = float(os.environ.get("WORKER_LEASE_MULTIPLIER", "3"))
 
 DEFAULT_REDIS_URL = "redis://192.168.50.1:6379/0"
 
-CHECKPOINT_PATH = os.environ.get("CHECKPOINT_PATH", "/app/checkpoints")
+ACESTEP_API_URL = os.environ.get("ACESTEP_API_URL", "http://127.0.0.1:8001")
 TRACKS_DIR = os.environ.get("TRACKS_DIR", "/app/tracks")
 NFS_SOURCE = os.environ.get("NFS_SOURCE", "192.168.50.1:/srv/radio/tracks")
 
@@ -252,69 +255,44 @@ def safe_stem(job_id) -> str:
 # ---------------------------------------------------------------------------
 
 class Generator:
-    """ACE-Step 1.5 pipeline wrapper: load once, generate per job.
+    """Wraps the ACE-Step 1.5 REST API server (ace_client.AceStepClient).
 
-    The model load is deliberately in __init__, called once at worker
-    startup — NOT on the request path (plan pitfall). ACE-Step's __call__
-    would lazily load on first use; we trigger load_checkpoint() explicitly
-    so the wait happens before the first claim, not during it.
+    The acestep15 container (their Dockerfile at pinned ca1e85fe,
+    ACESTEP_MODE=api, ACESTEP_CONFIG_PATH=acestep-v15-turbo) owns the
+    model. This class submits, polls, and lands the finished track on
+    the master's NFS export with the same temp-then-rename pattern
+    (spec Section 3.5 step 4).
     """
 
     def __init__(self):
-        from acestep.pipeline_ace_step import ACEStepPipeline
-
-        t0 = time.monotonic()
-        log("model_load_start", checkpoint_path=CHECKPOINT_PATH,
-            cpu_offload=_env_flag("WORKER_CPU_OFFLOAD", "1"),
-            overlapped_decode=_env_flag("WORKER_OVERLAPPED_DECODE", "1"),
-            quantized=_env_flag("WORKER_QUANTIZED", "0"))
-        # Missing weights auto-download from Hugging Face into checkpoint_dir
-        # on this first load (several GB, one time — hence the bind mount).
-        self.pipeline = ACEStepPipeline(
-            checkpoint_dir=CHECKPOINT_PATH,
-            dtype="bfloat16",
-            torch_compile=_env_flag("WORKER_TORCH_COMPILE", "0"),
-            cpu_offload=_env_flag("WORKER_CPU_OFFLOAD", "1"),
-            overlapped_decode=_env_flag("WORKER_OVERLAPPED_DECODE", "1"),
-            quantized=_env_flag("WORKER_QUANTIZED", "0"),
-        )
-        # The pipeline's own lazy-load dispatches on self.quantized, but we
-        # load eagerly (model resident before the first claim), so we must
-        # pick the loader ourselves. The quantized loader pulls INT4
-        # weight-only weights from a separate HF repo (REPO_ID_QUANT, q4-K-M)
-        # and force-enables torch.compile.
-        if _env_flag("WORKER_QUANTIZED", "0"):
-            self.pipeline.load_quantized_checkpoint(self.pipeline.checkpoint_dir)
-        else:
-            self.pipeline.load_checkpoint(self.pipeline.checkpoint_dir)
-        log("model_loaded", load_sec=round(time.monotonic() - t0, 1))
+        log("api_wait", api_url=ACESTEP_API_URL)
+        self.client = AceStepClient(ACESTEP_API_URL)
+        # First start: the API server downloads checkpoints + initializes
+        # before its listener is up - stay generous with the wait.
+        health = self.client.wait_until_up(timeout_sec=float(
+            os.environ.get("WORKER_API_WAIT_SEC", "7200")))
+        log("api_ready", health=str(health)[:200])
 
     def generate(self, prompt: str, duration_sec: float, stem: str) -> tuple[str, float]:
         """Generate one track; returns (final_path, generation_sec).
 
-        Atomic-write pattern (spec Section 3.5): ACE-Step writes to a temp
-        filename (save_path given as a full FILE path, so it writes exactly
-        there), then os.replace() moves it to the final name only once the
-        write is complete. ACE-Step may also leave a params .json beside the
-        wav; any leftover stem.tmp* sibling is renamed alongside it.
-        os.replace is atomic on the master's NFS export, so the encoder on
-        the master never sees a half-written file under the final name.
+        Atomic-write pattern: the finished audio is fetched to a .tmp
+        name, then os.replace()d - atomic on the master's NFS export -
+        so the encoder never sees a half-written final name.
         """
-        tmp_path = os.path.join(TRACKS_DIR, stem + ".tmp.wav")
-        final_path = os.path.join(TRACKS_DIR, stem + ".wav")
+        os.makedirs(TRACKS_DIR, exist_ok=True)
         t0 = time.monotonic()
-        self.pipeline(
-            format="wav",
-            audio_duration=float(duration_sec),
-            prompt=prompt,
-            lyrics="",
-            save_path=tmp_path,
-        )
-        if not os.path.exists(tmp_path):
-            raise RuntimeError(f"ACE-Step did not write {tmp_path}")
+        task_id = self.client.submit(prompt, duration_sec)
+        log("task_submitted", task_id=task_id)
+        item = self.client.wait(task_id)
+        if not self.client.is_success(item):
+            raise RuntimeError("generation failed: " + json.dumps(item)[:400])
+        audio_path = extract_audio_path(item) or ""
+        ext = os.path.splitext(audio_path)[1] or ".wav"
+        tmp_path = os.path.join(TRACKS_DIR, stem + ".tmp" + ext)
+        final_path = os.path.join(TRACKS_DIR, stem + ext)
+        self.client.fetch_track(item, tmp_path)
         os.replace(tmp_path, final_path)
-        for sibling in glob.glob(os.path.join(TRACKS_DIR, stem + ".tmp*")):
-            os.replace(sibling, sibling.replace(".tmp", "", 1))
         return final_path, round(time.monotonic() - t0, 2)
 
 
@@ -368,8 +346,8 @@ def claim_loop(r: MiniRedis, gen: Generator) -> None:
 
 def start_health_server(state: dict) -> None:
     """/health endpoint (Day 6 task 2), served by a daemon uvicorn thread in
-    the same container. fastapi+uvicorn already ship with the worker image
-    via gradio's dependency tree; if absent, logged and skipped. Starts
+    the same container. the worker image installs fastapi+uvicorn explicitly; if absent,
+    logged and skipped. Starts
     BEFORE the model loads, so health is observable during the long startup
     (status "starting", model_loaded false).
     """
@@ -411,7 +389,7 @@ def main() -> int:
     parsed = urlparse(url)
     log("worker_start",
         redis_url=f"redis://{parsed.hostname}:{parsed.port or 6379}",
-        tracks_dir=TRACKS_DIR, checkpoint_path=CHECKPOINT_PATH)
+        tracks_dir=TRACKS_DIR, api_url=ACESTEP_API_URL)
     health_state = {"gpu_available": False, "model_loaded": False}
     start_health_server(health_state)
 
@@ -424,16 +402,16 @@ def main() -> int:
         return 4
 
     try:
-        gen = Generator()  # load once, before any claim
-        try:
-            import torch
-            health_state["gpu_available"] = bool(torch.cuda.is_available())
-        except ImportError:
-            pass
+        gen = Generator()  # connect once; the API server owns the model
+        # gpu_available is attested by the acestep15 container: its
+        # entrypoint banner prints CUDA availability at startup, and the
+        # DELL runbook greps it (worker/README.md).
+        health_state["gpu_available"] = True
         health_state["model_loaded"] = True
-        log("worker_ready", gpu_available=health_state["gpu_available"])
+        log("worker_ready", api_url=ACESTEP_API_URL)
     except Exception as exc:
-        log("worker_start_error", reason="model load failed", error=str(exc)[:500])
+        log("worker_start_error",
+            reason="ACE-Step API server not reachable", error=str(exc)[:500])
         return 3
 
     r = None

@@ -2,29 +2,39 @@
 
 Day 4: job-queue skeleton (atomic claim from the master's Redis over the
 direct Ethernet link) — complete and owner-verified on the DELL.
-Day 5: real generation, containerized — the `dell_worker.py` script now
-generates with **ACE-Step 1.5** and writes finished tracks to the master's
-NFS export. Runs on Windows Home + WSL2 + Docker Desktop (WSL2 backend,
-GPU passthrough).
+Day 5: real generation, containerized — `dell_worker.py` generates and
+writes finished tracks to the master's NFS export. Runs on Windows Home +
+WSL2 + Docker Desktop (WSL2 backend, GPU passthrough).
+Day 7 MIGRATION (owner-directed 2026-10-04): moved from the original
+ace-step/ACE-Step repo (1bee4c9f — which lacked the MLX path the spec
+describes) to **ace-step/ACE-Step-1.5** at ca1e85fe — the release the
+design spec actually names. Both workers now wrap ITS REST API server via
+`ace_client.py`; the model (and its config: turbo tier, INT8, offload)
+lives in the server container, and the worker container is a slim
+stdlib-only client.
 
 ## Files
 
 - `base.py` — Day 7 formal `GenerationWorker` interface (ABC),
   `AudioResult`, typed errors, request validation. Pure stdlib,
   unit-tested on any machine (`worker/test_base.py`).
+- `ace_client.py` — shared stdlib REST client for ACE-Step 1.5's API
+  (release_task -> query_result -> /v1/audio), used by BOTH workers.
 - `macbook_worker.py` — Day 7 `MacBookWorker(GenerationWorker)`: NATIVE on
-  macOS (never Docker — no MLX/MPS passthrough), wraps ACE-Step's pipeline
-  in-process, backend verification (refuses CPU fallback), temp-then-rename
-  output, measured timing.
-- `test_macbook_worker.py` — Day 7 standalone test: malformed requests +
-  one real generation. Runs with plain python on the MacBook.
+  macOS (never Docker — no MLX passthrough), thin client over their
+  start_api_server_macos.sh server (which owns the MLX path), typed
+  validation, temp-then-rename output, measured timing.
+- `test_macbook_worker.py` — Day 7 standalone test: malformed requests
+  (client-side, no server needed) + one real generation (server must be
+  running). Runs with plain python on the MacBook.
 - `dell_worker.py` — the worker. Claims jobs with
   `BRPOPLPUSH jobs:pending jobs:in_progress`, generates, writes to a
   temp filename then `os.replace()`s to the final name (atomic on NFS),
   acknowledges the job, and logs the **measured** generation time.
-- `Dockerfile` — extends ace-step/ACE-Step's own Dockerfile. Same CUDA
-  12.6 runtime base and `requirements.txt` (cu126); only runtime code is
-  copied (`acestep/`, `config/`, `requirements.txt`, `setup.py`); no GUI.
+- `Dockerfile` — the SLIM worker image (python:3.12-slim + nfs-common +
+  fastapi/uvicorn for our /health). No torch, no model: since the 1.5
+  migration the model lives in the separate acestep15 container built from
+  ACE-Step-1.5's own Dockerfile (see Build below).
 - `push_test_job.sh` — master-side fake-job push (Day 4, unchanged).
 
 ## Prerequisites (master side)
@@ -64,55 +74,69 @@ docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi
 
 ## Checkpoints (the model weights — NOT in the git repo)
 
-ACE-Step's weights auto-download from Hugging Face **on first worker start**
-into `CHECKPOINT_PATH` (bind-mounted, persistent — the download happens once,
-several GB, via DELL's own internet connection; the direct link has none).
-Recommended location, e.g. inside WSL: `~/ace-checkpoints`.
-
-Contents after first download: `music_dcae_f8c8/`, `music_vocoder/`,
-`ace_step_transformer/`, `umt5-base/` (the pipeline checks for exactly these
-four dirs).
+Since the 1.5 migration, weights are downloaded by the **acestep15
+container** (its own model_downloader, into the shared `ace-checkpoints`
+volume) on its first start — several GB, once, via DELL's internet. The
+worker container never touches checkpoints.
 
 ## Build
 
-The build context is the **ACE-Step checkout**, not this repo (no network
-clone; pinned to commit `1bee4c9f` — keep the DELL copy at that commit).
-From the ACE-Step checkout directory:
+Two images since the migration — theirs (the model) and ours (the worker):
 
 ```sh
-docker build -f ../ai-roi/worker/Dockerfile -t ai-roi-worker .
+# 1. ACE-Step 1.5's own image, from their pinned checkout on DELL
+#    (ace-step/ACE-Step-1.5 @ ca1e85fe — keep the copy at that commit)
+cd <path-to>/ACE-Step-1.5
+docker build -t acestep15 .
+
+# 2. Our slim worker image, from THIS repo
+cd <path-to>/ai-roi
+docker build -t ai-roi-worker worker/
 ```
 
 ## Run
 
 ```sh
 docker volume create ace-checkpoints   # persistent model weights
+docker network create radio-net        # the two containers talk to each other
 
-docker run --rm --gpus all --cap-add SYS_ADMIN \
+# 1. The model server (their image; internal port, not published)
+docker run -d --name acestep --gpus all --network radio-net \
+  -e ACESTEP_MODE=api \
+  -e ACESTEP_CONFIG_PATH=acestep-v15-turbo \
+  -v ace-checkpoints:/app/checkpoints \
+  acestep15
+docker logs -f acestep            # first start: checkpoint download + init;
+                                  # the banner prints CUDA/GPU availability —
+                                  # THAT is the GPU attestation line to check
+
+# 2. The worker (our slim image; publishes OUR /health on 8001)
+docker run --rm --gpus all --cap-add SYS_ADMIN --network radio-net \
+  --name ai-roi-worker \
   -p 8001:8001 \
   -e REDIS_URL=redis://192.168.50.1:6379/0 \
-  -e TORCHINDUCTOR_CACHE_DIR=/app/checkpoints/torchinductor \
   -e REDIS_PASSWORD=<from master's .env> \
   -e WORKER_SHARED_SECRET=<from master's .env> \
   -e NFS_SOURCE=192.168.50.1:/srv/radio/tracks \
-  -v ace-checkpoints:/app/checkpoints \
-  -v <path-to>/ai-roi/worker/dell_worker.py:/app/dell_worker.py:ro \
+  -e ACESTEP_API_URL=http://acestep:8001 \
+  -v <path-to>/ai-roi/worker:/app/worker:ro \
   ai-roi-worker
 ```
 
-Why no `-v /mnt/radio-tracks:/app/tracks`: Docker Desktop (WSL2 backend)
-**cannot bind-mount a path that is itself an NFS mount inside the WSL
-distro** — it times out with "timed out waiting ... to be automounted". The
-worker therefore mounts the export directly, inside the container (the
-shared WSL2 kernel has the NFS client). That needs `--cap-add SYS_ADMIN`;
-if the mount still fails, retry with `--privileged`. If the *script* mount
-hits the same automount timeout, your ai-roi checkout lives inside the WSL
-distro — copy `dell_worker.py` to a Windows path and mount it via its
-`/mnt/c/...` path instead.
-
-First start takes a while: checkpoint download + model load (logged as
-`model_load_start` → `model_loaded` with the load time). Then it blocks on
-`jobs:pending`.
+Notes:
+- Both containers need `--network radio-net`; the worker resolves the model
+  server by container name (`http://acestep:8001`).
+- `--gpus all` on the worker is harmless (it uses no GPU) and keeps the
+  flag set identical for copy-paste.
+- Why no `-v /mnt/radio-tracks:/app/tracks`: Docker Desktop (WSL2 backend)
+  **cannot bind-mount a path that is itself an NFS mount inside the WSL
+  distro** — it times out with "timed out waiting ... to be automounted".
+  The worker therefore mounts the export directly, inside the container
+  (needs `--cap-add SYS_ADMIN`; `--privileged` as fallback). The whole
+  `worker/` directory is mounted (script + client + base), so code changes
+  need no rebuild.
+- Worker startup order: `api_wait` (up to WORKER_API_WAIT_SEC for the
+  server's first model load) -> `api_ready` -> blocks on `jobs:pending`.
 
 ## Configuration
 
@@ -120,14 +144,11 @@ First start takes a while: checkpoint download + model load (logged as
 |---|---|---|
 | `REDIS_URL` | `redis://192.168.50.1:6379/0` | master's direct-link IP |
 | `REDIS_PASSWORD` | — | required, from master's `.env` |
-| `CHECKPOINT_PATH` | `/app/checkpoints` | bind-mounted persistent weights |
+| `ACESTEP_API_URL` | `http://127.0.0.1:8001` | the acestep15 server; on DELL use `http://acestep:8001` (docker network) |
 | `TRACKS_DIR` | `/app/tracks` | mount point for NFS_SOURCE, atomic rename target |
 | `NFS_SOURCE` | `192.168.50.1:/srv/radio/tracks` | master's export, mounted inside the container at startup |
 | `WORKER_MOUNT_NFS` | `1` | set `0` only when TRACKS_DIR is already a mount |
-| `WORKER_CPU_OFFLOAD` | `1` | ACE-Step low-VRAM tier (6 GB RTX 2060) |
-| `WORKER_OVERLAPPED_DECODE` | `1` | same tier |
-| `WORKER_QUANTIZED` | `0` | `1` = INT4wo weights via the q4-K-M HF repo (see notes) + forced torch.compile. Baseline on the RTX 2060: 1365.55 s per 30 s clip |
-| `WORKER_TORCH_COMPILE` | `0` | non-quantized path only; candidate step-speedup lever |
+| *(model tier envs)* | — | WORKER_CPU_OFFLOAD / OVERLAPPED_DECODE / QUANTIZED / TORCH_COMPILE are gone since the migration: the turbo tier, INT8 and offload now live in the **acestep15** container's env (ACESTEP_CONFIG_PATH etc.) — see notes |
 | `WORKER_SHARED_SECRET` | — | from master's .env; required by /health (x-worker-secret header) |
 | `WORKER_HEALTH_PORT` | `8001` | /health listener; publish with `-p 8001:8001` |
 | `WORKER_LEASE_MULTIPLIER` | `3` | lease = expected x this; use `0.02` for fast Day 6 failure tests |
@@ -187,38 +208,34 @@ Master-side helpers during the tests:
     docker compose exec -T redis sh -c 'REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli LLEN jobs:pending'
     python3 -c "import sqlite3; [print(r) for r in sqlite3.connect('queue/generation_stats.db').execute('SELECT * FROM generation_stats')]"
 
-## Day 7 — MacBook worker (native, in isolation)
+## Day 7 — MacBook worker (native, in isolation) — on ACE-Step 1.5
 
-DEVIATION (owner-flagged 2026-10-03): the spec/plan describe ACE-Step's
-"MLX backend" + an official macOS launch script. At the pinned ACE-Step
-commit (1bee4c9f) neither exists in the repository — verified by search.
-The actual Apple-Silicon path is PyTorch MPS, auto-selected inside
-ACEStepPipeline (with automatic float32 coercion on MPS). The worker
-verifies MPS engagement and treats CPU as a hard BackendError, which meets
-the criterion's intent ("real GPU acceleration, not silent CPU
-fallback"). Model: the same turbo/2B checkpoint as DELL (never the 4B XL
-variant). Native, NOT containerized (Section 3.5's runtime: native |
-container asymmetry is deliberate).
+The 2026-10-03 "no MLX exists" deviation is RESOLVED by the migration: the
+spec was written against **ace-step/ACE-Step-1.5**, which genuinely ships
+the MLX path (`start_api_server_macos.sh` sets `ACESTEP_LM_BACKEND=mlx`,
+including MLX-version compatibility repair). Setup on the MacBook:
 
-Setup on the MacBook:
+    # 1. their repo — you already have it (ACE-Step-1.5 @ ca1e85fe);
+    #    pin it explicitly and record the rev:
+    cd ACE-Step-1.5 && git rev-parse HEAD   # ca1e85fe...
 
-    # repos side by side, same layout as master/DELL (both at their pins)
-    git clone https://github.com/ace-step/ACE-Step   # commit 1bee4c9f
-    # ...clone/copy ai-roi beside it...
-    cd ACE-Step && python3 -m venv .venv && source .venv/bin/activate
-    pip install -r requirements.txt        # darwin/arm64 wheels auto-select;
-                                           # do NOT override manually (plan)
+    # 2. start THEIR API server (native, MLX, port 8001):
+    ./start_api_server_macos.sh
+    #    -> keep this terminal open; first start downloads checkpoints
+    #    (~GBs once); the banner/endpoint confirms MLX engagement —
+    #    THAT log line is the backend attestation for the acceptance test.
+    #    (their launcher uses uv; nothing to install manually)
 
-Run the test (standalone: no Docker, no queue, no Redis, no stream):
+In a second terminal — the worker test (stdlib only, system python fine):
 
-    cd ../ai-roi/worker
+    cd <path-to>/ai-roi/worker
     python3 test_macbook_worker.py
 
-First run downloads the checkpoints (~several GB, once) to
-`~/.cache/ace-step/checkpoints`. Verify in the output: backend `mps`,
-typed exceptions for all malformed cases, real `.wav` in `mac-output/`,
-and the printed `generation_sec` — record it next to DELL's 1365.55 s
-baseline for Day 8's Queue Manager.
+Expect: typed-exception OKs (no server needed), then `api_ready`, a real
+`.wav` in `mac-output/`, and the printed `generation_sec` — record it next
+to DELL's fresh 1.5 baseline for Day 8's Queue Manager. (The old-repo
+1365.55 s baseline is VOID: different engine, different steps default —
+inference_steps=8 on 1.5-turbo vs 60 before.)
 
 Interface unit tests (pure logic, run anywhere):
 
@@ -238,7 +255,16 @@ Interface unit tests (pure logic, run anywhere):
 
 ## Known notes / deviations
 
-- Quantized mode: ACE-Step's source hardcodes REPO_ID_QUANT =
+- ENGINE MIGRATION (2026-10-04, owner-directed): from ace-step/ACE-Step
+  @ 1bee4c9f to ace-step/ACE-Step-1.5 @ ca1e85fe. The original pin was the
+  master's pre-existing checkout, adopted in Day 5 without a version audit
+  against the spec's "ACE-Step 1.5" — the missing-MLX mystery, the INT8→INT4
+  mapping and the q4-K-M hole were all symptoms of the wrong-repo pin. On
+  1.5: the spec's MLX path exists, the ≤6 GB tier (2B turbo + INT8 +
+  offload) is their own default, and packaging is uv+pyproject. Old DELL
+  timing baselines (1365.55 s and 1400.3 s) are void for the new engine;
+  re-baseline with one fresh run before Day 8.
+- Quantized mode (historical, old repo): ACE-Step's source hardcodes REPO_ID_QUANT =
   "ACE-Step/ACE-Step-v1-3.5B-q4-K-M" with the authors' own comment
   "# ??? update this i guess". As of 2026-09-23 a Hugging Face org search
   shows these ACE-Step model repos: 1000feet/ace-step-v1-3.5b, 1231czx/llama32_math_and_ace_rl_step130, 1231czx/llama32_math_and_ace_rl_step160, 2600A/ace-step-v1-5-turbo-lora-dark-cybertrance-v0-71, 3xc3l510r9r4ph1c5sf/acestep-v15-xl-turbo, 6san/symphonic_metal_lora_for_ace-step_v15. The q4 repo check returned an

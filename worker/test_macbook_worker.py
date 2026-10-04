@@ -1,25 +1,28 @@
-"""Standalone MacBookWorker test — Day 7, task 7 (detailed-plan).
+"""Standalone MacBookWorker test — Day 7, on ACE-Step 1.5.
 
-No queue, no Redis, no stream — exactly like Sprint 2's DELL smoke test,
-now for the second worker. Run NATIVELY on the MacBook (this file is
-executed by plain python on macOS; it is NOT a docker-compose test):
+Prerequisite for part 2: the ACE-Step 1.5 API server must be RUNNING
+first — it owns the model (MLX engagement included); this worker is a
+thin stdlib client. On the MacBook (native, no Docker):
+
+    cd <path-to>/ACE-Step-1.5          # the pinned ace-step/ACE-Step-1.5
+    ./start_api_server_macos.sh        # their launcher: venv + MLX + server
+
+Wait for its banner (server on :8001). Then, from THIS repo:
 
     cd <ai-roi>/worker
-    python3 test_macbook_worker.py           # or: python3.12, ./venv/bin/python
+    python3 test_macbook_worker.py     # system python is fine: the test and
+                                       # worker are stdlib-only; the venv
+                                       # belongs to their server
 
-First run downloads the turbo/2B checkpoints into
-~/.cache/ace-step/checkpoints (several GB, once — same model as DELL,
-NOT the 4B XL variant).
-
-What it exercises (the Day 7 acceptance criteria, in order):
+What it exercises (Day 7 acceptance criteria, in order):
   1. malformed / oversized requests -> typed exceptions, zero crashes
+     (validation is client-side in base.py — no server needed for this)
   2. a real generation from a real prompt -> valid playable file
-  3. backend verification -> the worker REFUSES to run on CPU fallback
-     (logged backend must be "mps"; see the MLX deviation note in
-     macbook_worker.py — ACE-Step at commit 1bee4c9f has no MLX path)
-  4. measured wall-clock generation time printed at the end — record it:
-     it is the MacBook data point next to DELL's 1365.55 s baseline that
-     the Day 8 Queue Manager needs.
+  3. backend attestation lives in the SERVER's startup log — grep it per
+     worker/README.md (their launcher owns the MLX path); this test
+     reports and checks the server side as reachable
+  4. measured wall-clock generation time printed at the end — record it
+     next to DELL's fresh 1.5 baseline for Day 8's Queue Manager.
 """
 
 import asyncio
@@ -29,7 +32,7 @@ from macbook_worker import MacBookWorker
 
 
 def test_malformed_requests() -> None:
-    print("== malformed request handling ==")
+    print("== malformed request handling (client-side; server not needed) ==")
     worker = MacBookWorker()
 
     cases = [
@@ -49,19 +52,19 @@ def test_malformed_requests() -> None:
 
 
 async def test_real_generation() -> None:
-    print("== real generation ==")
+    print("== real generation (API server must be running on :8001) ==")
     worker = MacBookWorker()
+    worker.ensure_server()  # clear, fast failure if the server is down
     result = await worker.generate("lo-fi hip hop beat", 30)
     print(f"  backend        : {result.backend}")
     print(f"  track          : {result.track_path}")
     print(f"  generation_sec : {result.generation_sec}  <-- RECORD THIS NUMBER")
     print(f"  avg so far     : {worker.avg_latency_sec()}s")
-    assert result.backend != "cpu", "backend verification failed"
-    print("  saved file is a complete .wav (temp-then-rename, never partial)")
+    print("  saved via temp-then-rename (never a partial final file)")
 
 
 if __name__ == "__main__":
     test_malformed_requests()
     asyncio.run(test_real_generation())
-    print("DONE — Day 7 acceptance: play the .wav, confirm mps in the logs,")
-    print("record generation_sec next to DELL's 1365.55 s baseline.")
+    print("DONE — Day 7 acceptance: play the .wav, grep the SERVER log for")
+    print("MLX engagement, record generation_sec next to DELL's 1.5 baseline.")

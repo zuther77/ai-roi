@@ -19,8 +19,14 @@ the master. Measured on the RTX 2060 (cpu_offload tier): **1365.55 s per
 30 s clip** - the Sprint 3 timing baseline. **Day 6 complete and owner-verified** (2026-10-03): all three deliberate
 failure tests (kill mid-generation, cable pull, disk-full) plus /health
 checks passed. **Sprint 2 closes**: DELL is a proven, failure-safe
-generation worker. **Day 7 (MacBook as a second worker) is next** - not
-started.
+generation worker. **Day 7 in progress on a new engine**: owner-directed migration
+(2026-10-04) from ace-step/ACE-Step @ 1bee4c9f to **ace-step/ACE-Step-1.5
+@ ca1e85fe** - the release the design spec always meant (it genuinely ships
+the MLX path and the turbo/INT8 tier). Both workers now wrap ITS REST API
+server via worker/ace_client.py; the worker container is slim (no torch);
+model config lives in the acestep15 container. Implementation complete,
+owner re-verification pending: DELL two-container run + fresh timing
+baseline (old 1365.55 s number is void), then the Mac.
 
 ---
 
@@ -271,6 +277,25 @@ The plan's "multiplier too tight" pitfall was demonstrated live: a job run
 with the 30 s failure-test lease was requeued by the reaper while the
 worker was still generating (expected trade-off; production default 3
 cannot hit it).
+
+### Engine migration to ACE-Step 1.5 (2026-10-04) - implemented, owner re-verification pending
+Day 5 had adopted the master's pre-existing checkout of the ORIGINAL
+ace-step/ACE-Step repo at 1bee4c9f without a version audit against the
+spec's "ACE-Step 1.5". The owner challenged it (the Mac already carried an
+ACE-Step-1.5 clone); investigation confirmed 1.5 is an official, actively
+maintained successor repo with MLX on macOS, per-platform pinned deps
+(uv), and a VRAM tier table matching the spec verbatim. Changes:
+worker/ace_client.py (shared stdlib REST client: release_task ->
+query_result -> /v1/audio), dell_worker.py rewired onto it (slim worker
+image: python:3.12-slim + nfs-common + fastapi; the MODEL runs in a
+separate acestep15 container built from THEIR Dockerfile at ca1e85fe,
+ACESTEP_MODE=api, ACESTEP_CONFIG_PATH=acestep-v15-turbo, shared
+redis... no - shared ace-checkpoints volume + docker network
+radio-net), macbook_worker.py + test_macbook_worker.py rewritten to the
+same client (the Mac keeps their start_api_server_macos.sh server, which
+owns MLX engagement). Leases/reaper/stats/health/base.py untouched
+(model-agnostic by design). Old DELL baselines (1365.55 s, 1400.3 s) are
+VOID for the new engine; re-baseline before Day 8.
 
 ## 6. Known risks and open items
 

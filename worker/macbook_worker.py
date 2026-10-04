@@ -1,156 +1,67 @@
-"""MacBook generation worker — Day 7, tasks 4-6 (detailed-plan).
+"""MacBook generation worker — Day 7, on ACE-Step 1.5 (spec-conformant).
 
-MacBookWorker(GenerationWorker): wraps ACE-Step's pipeline directly in the
-same process. Runs NATIVELY on macOS — deliberately not containerized:
-Apple Silicon has no MLX/MPS passthrough into Docker Desktop's Linux VM,
-so a container would silently run CPU-only (design spec Section 3.5's
-`runtime: native | container` asymmetry is deliberate, not an oversight).
+MacBookWorker(GenerationWorker): the ONLY native worker (design spec
+Section 3.5 runtime: native | container — Docker on Apple Silicon has
+no MLX/GPU passthrough, so containerizing would silently run CPU-only).
 
-DEVIATION, documented (owner flag 2026-10-03): the plan/spec describe an
-"MLX backend" set by an official macOS launch script. At the pinned
-ACE-Step commit (1bee4c9f) there is NO MLX code and NO macOS launch
-script anywhere in that repository - verified by search. What the repo
-actually ships for Apple Silicon is PyTorch MPS, auto-selected inside
-ACEStepPipeline.__init__ (with automatic float32 coercion on MPS). This
-worker therefore verifies MPS engagement and treats CPU as a hard
-BackendError: the acceptance criterion's intent - "prove real GPU
-acceleration, not silent CPU fallback" - is met via MPS. If ACE-Step
-later ships true MLX, this check remains correct: any non-CPU backend
-passes, and the logged backend name says which one ran.
-
-Everything else mirrors the DELL worker's proven pattern: same
-turbo/2B checkpoint (REPO_ID auto-download), model loaded once and kept
-resident, temp filename then atomic rename for the output, measured
-generation time reported per job, single generation at a time.
+Since the ACE-Step 1.5 migration this wraps ACE-Step's OWN REST API
+server — on the Mac that server is started by their
+start_api_server_macos.sh, which handles the entire MLX engagement
+(backend selection, even MLX-version compatibility repair). The worker
+itself carries no model code (stdlib only — it runs fine on the system
+python; the venv belongs to the server) and mirrors the DELL worker's
+architecture exactly: base.py interface + ace_client.py client, with
+GPU/backend attestation happening server-side where the model lives.
+The verified backend line to look for is in the SERVER's startup
+banner/logs, not in this process (README runbook documents the grep).
 """
 
 from __future__ import annotations
 
 import asyncio
-import glob
 import json
 import os
-import sys
 import time
-from urllib.parse import unquote, urlparse  # noqa: F401  (parity with other workers)
+from datetime import datetime, timezone
 
-from base import (
-    AudioResult,
-    BackendError,
-    GenerationWorker,
-    WorkerError,
-    validate_request,
-)
+from ace_client import AceStepClient, extract_audio_path
+from base import AudioResult, GenerationWorker, WorkerError, validate_request
 
 WORKER_NAME = "macbook"
-
-# ACE-Step's own default checkpoint cache; env-overridable.
-CHECKPOINT_PATH = os.environ.get("CHECKPOINT_PATH",
-                                 os.path.expanduser("~/.cache/ace-step/checkpoints"))
-
-
-def _ensure_acestep_import() -> None:
-    """Make the pinned ACE-Step checkout importable.
-
-    The worker runs against a clone of ACE-Step beside this repo (the
-    layout on master and DELL), not necessarily a pip-installed package.
-    Order: already-imported > already-importable (e.g. `pip install .`) >
-    ACESTEP_DIR env > the sibling ../ACE-Step checkout.
-    """
-    import sys
-    if "acestep" in sys.modules:
-        return
-    try:
-        import acestep  # noqa: F401  (already importable)
-        return
-    except ImportError:
-        pass
-    candidates = []
-    if os.environ.get("ACESTEP_DIR"):
-        candidates.append(os.environ["ACESTEP_DIR"])
-    # worker/<this file> -> repo root -> sibling ACE-Step
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    candidates.append(os.path.join(os.path.dirname(repo_root), "ACE-Step"))
-    for cand in candidates:
-        if os.path.isdir(os.path.join(cand, "acestep")):
-            sys.path.insert(0, os.path.abspath(cand))
-            log("acestep_path_injected", path=os.path.abspath(cand))
-            return
-    raise WorkerError(
-        "cannot import 'acestep': no pip-installed package and no checkout "
-        "found. Either `pip install .` inside the ACE-Step checkout, or "
-        "place/symlink it beside this repo, or set ACESTEP_DIR.")
-# Local output dir (Day 7 is isolated: no NFS, no queue, no stream).
+# Their macOS launcher binds the API server on localhost:8001.
+API_URL = os.environ.get("ACESTEP_API_URL", "http://127.0.0.1:8001")
+# Day 7 is isolated: output lands locally (no NFS, no queue, no stream).
 OUTPUT_DIR = os.environ.get("MACBOOK_OUTPUT_DIR", "mac-output")
 
 
 def log(event: str, **fields) -> None:
-    entry = {"ts": __import__("datetime").datetime.now(
-        __import__("datetime").timezone.utc).isoformat(),
-        "worker": WORKER_NAME, "event": event}
+    entry = {"ts": datetime.now(timezone.utc).isoformat(),
+             "worker": WORKER_NAME, "event": event}
     entry.update(fields)
     print(json.dumps(entry), flush=True)
 
 
 class MacBookWorker(GenerationWorker):
-    """The macOS worker. Construct it, call load_model() (or let the first
-    generate() call do it), then generate()."""
+    """The macOS worker: wraps a running ACE-Step 1.5 API server.
+
+    Construct, call ensure_server() (or let the first generate() do it),
+    then generate(). Backend attestation (MLX vs CPU) lives in the
+    server's own startup banner/logs; this worker reports the server as
+    its backend.
+    """
 
     worker_name = WORKER_NAME
 
-    def __init__(self):
-        self._pipeline = None
-        self._backend: str | None = None
+    def __init__(self, api_url: str = API_URL):
+        self._client = AceStepClient(api_url)
+        self.backend = "acestep-1.5-api"
 
-    # ------------------------------------------------------------------
-    # Model lifecycle
-    # ------------------------------------------------------------------
-
-    def load_model(self) -> str:
-        """Construct the pipeline + load checkpoints once; returns the
-        engaged backend. Idempotent. Raises BackendError if ACE-Step
-        resolved to CPU (the acceptance criterion: never run silently
-        on CPU fallback).
-
-        Default flags suit Apple Silicon unified memory: cpu_offload off
-        (it is a small-VRAM-GPU workaround and meaningless here),
-        torch_compile off (unsupported on MPS at the pinned torch),
-        quantized off (upstream's q4 weights repo is unpublished).
-        """
-        if self._pipeline is not None:
-            return self._backend
-
-        _ensure_acestep_import()
-        from acestep.pipeline_ace_step import ACEStepPipeline
-
-        t0 = time.monotonic()
-        log("model_load_start", checkpoint_path=CHECKPOINT_PATH)
-        self._pipeline = ACEStepPipeline(
-            checkpoint_dir=CHECKPOINT_PATH,
-            cpu_offload=False,
-            overlapped_decode=False,
-            torch_compile=False,
-            quantized=False,
-        )
-        self._pipeline.load_checkpoint(self._pipeline.checkpoint_dir)
-        self._backend = str(self._pipeline.device.type)
-        log("model_loaded", load_sec=round(time.monotonic() - t0, 1),
-            backend=self._backend)
-
-        if self._backend == "cpu":
-            self._pipeline = None
-            self._backend = None
-            raise BackendError(
-                "ACE-Step resolved to CPU — expected MPS on Apple Silicon. "
-                "Check that torch was installed with macOS/MPS support "
-                "(their requirements.txt selects the darwin/arm64 wheels; "
-                "do not override it manually) and that you are on Apple "
-                "Silicon. Refusing to run silently on CPU fallback.")
-        return self._backend
-
-    # ------------------------------------------------------------------
-    # GenerationWorker interface
-    # ------------------------------------------------------------------
+    def ensure_server(self, timeout_sec: float = 7200.0) -> None:
+        """Block until the API server answers /health. First start
+        includes checkpoint download + model init — stay generous."""
+        log("api_wait", api_url=self._client.base_url)
+        health = self._client.wait_until_up(timeout_sec=timeout_sec)
+        log("api_ready", health=str(health)[:200])
 
     def is_busy(self) -> bool:
         return self._busy
@@ -158,60 +69,45 @@ class MacBookWorker(GenerationWorker):
     async def generate(self, prompt: str, duration_sec: int) -> AudioResult:
         if self._busy:
             raise WorkerError("worker is busy: single generation at a time")
-
         prompt, duration_sec = validate_request(prompt, duration_sec)
         self._begin()
         try:
-            # The pipeline call is blocking C-level work; to_thread keeps
-            # the async interface honest without a second process.
-            return await asyncio.to_thread(self._generate_sync, prompt, duration_sec)
+            # The HTTP submit/poll cycle is blocking I/O; to_thread keeps
+            # the async interface honest.
+            return await asyncio.to_thread(
+                self._generate_sync, prompt, duration_sec)
         except BaseException:
             self._busy = False
             raise
 
-    # ------------------------------------------------------------------
-    # blocking core (runs in a worker thread via asyncio.to_thread)
-    # ------------------------------------------------------------------
-
     def _generate_sync(self, prompt: str, duration_sec: float) -> AudioResult:
-        if self._pipeline is None:
-            self.load_model()
-        assert self._pipeline is not None and self._backend
+        if self._client.health() is None:
+            self.ensure_server()
 
-        stem = self._now_ts_stem()
-        tmp_path = os.path.join(OUTPUT_DIR, stem + ".tmp.wav")
-        final_path = os.path.join(OUTPUT_DIR, stem + ".wav")
         os.makedirs(OUTPUT_DIR, exist_ok=True)
-
+        stem = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
         t0 = time.monotonic()
-        self._pipeline(
-            format="wav",
-            audio_duration=duration_sec,
-            prompt=prompt,
-            lyrics="",
-            save_path=tmp_path,   # a full FILE path: ACE-Step writes exactly here
-        )
-        gen_sec = round(time.monotonic() - t0, 2)
-        if not os.path.exists(tmp_path):
-            raise WorkerError(f"ACE-Step did not write {tmp_path}")
-        os.replace(tmp_path, final_path)
-        # ACE-Step may leave a params .json beside the wav; rename it too.
-        for sibling in glob.glob(os.path.join(OUTPUT_DIR, stem + ".tmp*")):
-            os.replace(sibling, sibling.replace(".tmp", "", 1))
+        task_id = self._client.submit(prompt, duration_sec)
+        log("task_submitted", task_id=task_id)
+        item = self._client.wait(task_id)
+        if not self._client.is_success(item):
+            raise WorkerError("generation failed: " + json.dumps(item)[:400])
 
-        self._end(gen_sec)  # clears busy, records the measured latency
+        audio_path = extract_audio_path(item) or ""
+        ext = os.path.splitext(audio_path)[1] or ".wav"
+        tmp_path = os.path.join(OUTPUT_DIR, stem + ".tmp" + ext)
+        final_path = os.path.join(OUTPUT_DIR, stem + ext)
+        self._client.fetch_track(item, tmp_path)
+        os.replace(tmp_path, final_path)  # atomic: never a partial file
+        gen_sec = round(time.monotonic() - t0, 2)
+
+        self._end(gen_sec)  # clears busy, records measured latency
         return AudioResult(
             track_path=os.path.abspath(final_path),
             prompt=prompt,
             target_duration_sec=duration_sec,
             generation_sec=gen_sec,
             worker=WORKER_NAME,
-            backend=self._backend,
-            completed_at=self._now_iso(),
+            backend=self.backend,
+            completed_at=datetime.now(timezone.utc).isoformat(),
         )
-
-    @staticmethod
-    def _now_ts_stem() -> str:
-        import datetime
-        return datetime.datetime.now(datetime.timezone.utc).strftime(
-            "%Y%m%dT%H%M%SZ")
