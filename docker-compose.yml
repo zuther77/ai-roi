@@ -89,7 +89,6 @@ services:
     # Binding fails if an interface is down — deliberate, not a bug.
     ports:
       - "192.168.1.210:6379:6379"
-      - "192.168.50.1:6379:6379"
 
     # Day 6: queue persistence. appendonly + a named volume so pending and
     # in-progress jobs survive a Redis restart (the Day 4 skeleton accepted
