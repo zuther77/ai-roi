@@ -55,7 +55,7 @@ PLAYLIST_STDIN="${PLAYLIST_STDIN:-0}"
 AUDIO_FILE="${AUDIO_FILE:-/app/test-assets/track.mp3}"
 IMAGE_FILE="${IMAGE_FILE:-/app/test-assets/image.jpg}"
 
-if [[ "$PLAYLIST_STDIN" == "1" ]]; then
+if [[ -n "${AUDIO_FIFO:-}" || "$PLAYLIST_STDIN" == "1" ]]; then
     :
 elif [[ -n "$PLAYLIST_FILE" ]]; then
     if [[ ! -f "$PLAYLIST_FILE" ]]; then
@@ -124,9 +124,14 @@ FFMPEG_ARGS=(
     -re -loop 1 -framerate "$FRAMERATE" -i "$PRESCALED_IMAGE"
 )
 
-if [[ "$PLAYLIST_STDIN" == "1" ]]; then
-    # Playlist text arrives on stdin and is extended while we run. Media
-    # files themselves are ordinary paths named by each `file` line.
+if [[ -n "${AUDIO_FIFO:-}" ]]; then
+    # Day 8: raw PCM written by the controller. The concat-on-stdin
+    # playlist never finishes its header while the pipe stays open, so
+    # FFmpeg sent zero packets and YouTube saw no data.
+    FFMPEG_ARGS+=(
+        -re -f s16le -ar 44100 -ac 2 -i "$AUDIO_FIFO"
+    )
+elif [[ "$PLAYLIST_STDIN" == "1" ]]; then
     FFMPEG_ARGS+=(
         -re -f concat -safe 0 -protocol_whitelist file,pipe,crypto -i pipe:0
     )
@@ -174,7 +179,7 @@ FFMPEG_ARGS+=(
 # -shortest: image loops forever; end when audio (playlist or single file) ends.
 # Always needed in playlist mode. In single-file mode, only when STREAM_LOOP
 # is finite (same as Day 1–2).
-if [[ "$PLAYLIST_STDIN" == "1" || -n "$PLAYLIST_FILE" || "$STREAM_LOOP" != "-1" ]]; then
+if [[ -n "${AUDIO_FIFO:-}" || "$PLAYLIST_STDIN" == "1" || -n "$PLAYLIST_FILE" || "$STREAM_LOOP" != "-1" ]]; then
     FFMPEG_ARGS+=( -shortest )
 fi
 
@@ -188,7 +193,10 @@ fi
 # ---------------------------------------------------------------------------
 # 5. Go
 # ---------------------------------------------------------------------------
-if [[ "$PLAYLIST_STDIN" == "1" ]]; then
+if [[ -n "${AUDIO_FIFO:-}" ]]; then
+    echo "playout: mode   gapless pcm fifo (Day 8)"
+    echo "playout: audio  ${AUDIO_FIFO}"
+elif [[ "$PLAYLIST_STDIN" == "1" ]]; then
     echo "playout: mode   gapless concat, playlist on stdin (Day 8)"
 elif [[ -n "$PLAYLIST_FILE" ]]; then
     echo "playout: mode   gapless concat (Option A)"

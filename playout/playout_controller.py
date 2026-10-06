@@ -426,63 +426,105 @@ def _write_playlist(proc: subprocess.Popen, line: str) -> None:
     proc.stdin.flush()
 
 
+def _open_fifo_writer(fifo: Path, proc: subprocess.Popen, timeout: float = 60):
+    """Block until FFmpeg opens the read end, but do not wait forever."""
+    holder: dict = {}
+
+    def _open() -> None:
+        holder["fd"] = os.open(fifo, os.O_WRONLY)
+
+    thread = threading.Thread(target=_open, name="fifo-open", daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if "fd" not in holder:
+        if proc.poll() is None:
+            proc.kill()
+        raise TimeoutError(f"ffmpeg did not open {fifo} within {timeout:.0f}s")
+    return holder["fd"]
+
+
+def _decode_into(slot: PlaySlot, fifo_fd: int) -> int:
+    """Decode one file to 44.1k stereo PCM. Faster than realtime; the fifo paces it."""
+    result = subprocess.run(
+        [
+            "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+            "-i", slot.path,
+            "-f", "s16le", "-ar", "44100", "-ac", "2",
+            "pipe:1",
+        ],
+        stdout=fifo_fd,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode != 0:
+        err = (result.stderr or b"").decode(errors="replace")[:300]
+        log_event(
+            logging.ERROR, "decode_failed",
+            f"could not decode {slot.label}: {err}",
+            track=slot.label, exit_code=result.returncode,
+        )
+    return result.returncode
+
+
 def play_tailable(pool: FillerPool, store) -> int:
-    """One FFmpeg process. Filenames are appended on stdin as wall clock advances."""
-    slot = None
-    while slot is None and not _shutdown_requested:
-        slot = _next_slot(pool, store)
-        if slot is None:
-            log_event(
-                logging.WARNING, "pool_empty",
-                f"nothing ready and no filler — retrying in {EMPTY_POOL_RETRY_SEC}s",
-            )
-            time.sleep(EMPTY_POOL_RETRY_SEC)
-    if slot is None:
-        return 0
+    """One FFmpeg process. Audio is PCM pushed into a fifo, back to back.
+
+    A concat script on stdin never finishes its header while that pipe stays
+    open, so the RTMP output never starts. A pcm fifo does not have that wait.
+    """
+    fifo = Path("/tmp/playout-pcm.fifo")
+    if fifo.exists():
+        fifo.unlink()
+    os.mkfifo(fifo, 0o600)
 
     env = {
         **os.environ,
-        "PLAYLIST_STDIN": "1",
+        "AUDIO_FIFO": str(fifo),
+        "PLAYLIST_STDIN": "0",
         "PLAYLIST_FILE": "",
         "AUDIO_FILE": "",
     }
-    proc = subprocess.Popen([str(STREAM_SCRIPT)], stdin=subprocess.PIPE, env=env)
+    proc = subprocess.Popen([str(STREAM_SCRIPT)], env=env)
     code = 1
+    fifo_fd = None
     try:
-        _write_playlist(proc, "ffconcat version 1.0")
-        while slot is not None and not _shutdown_requested and proc.poll() is None:
-            # file: is required. The playlist itself is pipe:0, and a bare
-            # absolute path is then opened as pipe:/that/path.
-            _write_playlist(proc, "file " + _ffconcat_escape("file:" + slot.path))
+        fifo_fd = _open_fifo_writer(fifo, proc)
+        while not _shutdown_requested and proc.poll() is None:
+            slot = _next_slot(pool, store)
+            if slot is None:
+                log_event(
+                    logging.WARNING, "pool_empty",
+                    f"nothing ready and no filler — retrying in {EMPTY_POOL_RETRY_SEC}s",
+                )
+                time.sleep(EMPTY_POOL_RETRY_SEC)
+                continue
             log_event(
                 logging.INFO, "track_start",
                 f"playing {slot.label}",
                 track=slot.label, duration_sec=slot.duration_sec,
             )
-            if not _wait_slot(slot.duration_sec - PLAYLIST_LEAD_SEC, proc):
+            _decode_into(slot, fifo_fd)
+            if proc.poll() is not None:
                 break
-            nxt = _next_slot(pool, store)
-            while nxt is None and proc.poll() is None and not _shutdown_requested:
-                if not _wait_slot(1, proc):
-                    break
-                nxt = _next_slot(pool, store)
-            if slot.queue_item_id and nxt is not None:
+            if slot.queue_item_id:
                 store.mark_played(slot.queue_item_id)
-                log_event(logging.INFO, "track_end", f"finished {slot.label}", track=slot.label)
-            slot = nxt
-    except BrokenPipeError:
-        log_event(logging.ERROR, "ffmpeg_error", "playlist pipe closed", reason="broken_pipe")
+            log_event(logging.INFO, "track_end", f"finished {slot.label}", track=slot.label)
+    except (BrokenPipeError, TimeoutError) as exc:
+        log_event(logging.ERROR, "ffmpeg_error", str(exc), reason="pcm_fifo")
     finally:
-        if proc.stdin is not None:
+        if fifo_fd is not None:
             try:
-                proc.stdin.close()
-            except BrokenPipeError:
+                os.close(fifo_fd)
+            except OSError:
                 pass
         try:
             code = proc.wait(timeout=15)
         except subprocess.TimeoutExpired:
             proc.kill()
             code = proc.wait(timeout=5)
+        try:
+            fifo.unlink()
+        except OSError:
+            pass
     return code
 
 
