@@ -87,7 +87,7 @@ was added (Sprint 2).
 
 ```sh
 showmount -e 192.168.1.210
-# must list: /srv/radio/tracks  192.168.1.50,192.168.1.51 (plus the legacy direct-link client if present)
+# must list: /srv/radio/tracks  192.168.1.0/24
 ss -tln | grep -E ':(2049|111)\b'      # nfsd + portmapper listening
 ```
 
@@ -96,7 +96,7 @@ have one blocking LAN by default):
 
 ```sh
 sudo ufw status
-# if "active", allow the workers' IPs:
+# if "active", allow the LAN subnet (workers are DHCP; their IPs are not fixed):
 sudo ufw allow from 192.168.1.0/24 to any port 2049
 ```
 
@@ -132,17 +132,25 @@ Notes, both learned the hard way on this project:
 
 ### macOS worker (native, no WSL)
 
+macOS has no `/mnt`, and `/` is a read-only system volume, so
+`mkdir /mnt/...` fails with `Read-only file system`. Mount under
+`/Volumes`, which is the writable place macOS already uses for mounts.
+
+`vers=3` matches the export this project already proved (the `insecure`
+option is an NFSv3 source-port rule). NFSv4 on macOS often fails later
+with a permission error that looks like a bad export.
+
 ```sh
-sudo mkdir -p /mnt/radio-tracks
-sudo mount_nfs 192.168.1.210:/srv/radio/tracks /mnt/radio-tracks
-# if the mount is refused, retry with:
-sudo mount_nfs -o resvport 192.168.1.210:/srv/radio/tracks /mnt/radio-tracks
+sudo mkdir -p /Volumes/radio-tracks
+sudo mount_nfs -o vers=3 192.168.1.210:/srv/radio/tracks /Volumes/radio-tracks
+# if the mount is refused, retry with a privileged source port:
+sudo mount_nfs -o vers=3,resvport 192.168.1.210:/srv/radio/tracks /Volumes/radio-tracks
 mount | grep radio-tracks        # proves the mount is live
 ```
 
-macOS ships the NFS client; nothing to install. `resvport` asks macOS to
-use a privileged source port, needed only if the server's `insecure`
-option were ever removed.
+macOS ships the NFS client; nothing to install. The mount does not
+survive a reboot — re-run the `mkdir` and `mount_nfs` lines. `resvport`
+is only needed if the server's `insecure` option is removed.
 
 ### Linux worker (native)
 
@@ -155,20 +163,30 @@ findmnt /mnt/radio-tracks
 
 ---
 
-## Part 3 — The test file (identical steps for every OS)
+## Part 3 — The test file
 
-From the worker's mounted directory:
+Set `TRACKS` to the mount path from Part 2, then the rest is the same
+on every OS:
+
+| OS | `TRACKS` |
+|---|---|
+| Windows (WSL) and Linux | `/mnt/radio-tracks` |
+| macOS | `/Volumes/radio-tracks` |
 
 ```sh
-echo "hello from $(hostname)" > /mnt/radio-tracks/.probe-$(hostname)
-cat /mnt/radio-tracks/.probe-$(hostname)     # worker reads back its own file
+TRACKS=/mnt/radio-tracks          # macOS: TRACKS=/Volumes/radio-tracks
+
+echo "hello from $(hostname)" > "$TRACKS/.probe-$(hostname)"
+cat "$TRACKS/.probe-$(hostname)"     # worker reads back its own file
 ```
 
-On the **master**, verify it arrived:
+On the **master**, verify it arrived. Use the hostname the worker
+printed — do not leave a `$()` placeholder; the shell would try to run
+it as a command:
 
 ```sh
 ls -la /srv/radio/tracks/ | grep probe
-cat "/srv/radio/tracks/.probe-$(your-worker-hostname)"   # substitute the name
+cat /srv/radio/tracks/.probe-HOSTNAME
 ```
 
 Then prove the reverse direction (worker sees what the master writes):
@@ -176,12 +194,12 @@ Then prove the reverse direction (worker sees what the master writes):
 ```sh
 # on the master:
 echo "hello from master" > /srv/radio/tracks/.probe-master
-# on the worker:
-cat /mnt/radio-tracks/.probe-master
+# on the worker (TRACKS still set as above):
+cat "$TRACKS/.probe-master"
 ```
 
-Clean up from either side (`rm /mnt/radio-tracks/.probe-*` or the
-master's `rm /srv/radio/tracks/.probe-*`).
+Clean up from either side (`rm "$TRACKS"/.probe-*` on the worker, or
+`rm /srv/radio/tracks/.probe-*` on the master).
 
 **Pass criteria:** the worker-written file is visible and readable on the
 master's `/srv/radio/tracks`, and the master-written file is readable on
@@ -199,6 +217,7 @@ temp-write-then-`rename()` pattern — see `worker/README.md`).
 | `bad option; ... need a /sbin/mount.<type> helper` | `nfs-common` not installed (classic WSL2 first attempt) | `sudo apt-get install -y nfs-common` |
 | `mount.nfs: Connection timed out` | Wrong IP, worker on a different subnet/VLAN (guest Wi-Fi), or firewall | `ping 192.168.1.210`, check router isolation settings ("AP/client isolation" off), Step 6 firewall rules |
 | `Permission denied` on write | `/srv/radio/tracks` not `1777` on the master | `sudo chmod 1777 /srv/radio/tracks` (root_squash is fine *because* 1777 absorbs uid differences) |
-| macOS `mount_nfs` refused | privileged-port requirement | retry with `-o resvport` |
+| macOS `Read-only file system` creating the mount directory | `/mnt` does not exist and `/` cannot be written | use `/Volumes/radio-tracks` (Part 2, macOS) |
+| macOS `mount_nfs` refused | privileged-port requirement, or NFSv4 negotiation | retry with `-o vers=3,resvport` |
 | Mounted earlier, `Stale file handle` now | Server re-exported (`exportfs -ra`) or rebooted underneath the mount | Re-run the mount command |
 | Docker: `timed out waiting ... to be automounted` | Docker Desktop WSL2 cannot pass a WSL-side NFS path into containers — a Windows-specific quirk, not a broken setup | The machine mount above stays for manual use; containers mount the export themselves (runbook in `worker/README.md`) |

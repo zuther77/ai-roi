@@ -55,7 +55,7 @@ async def test_real_generation() -> None:
     print("== real generation (API server must be running on :8001) ==")
     worker = MacBookWorker()
     worker.ensure_server()  # clear, fast failure if the server is down
-    result = await worker.generate("lo-fi hip hop beat", 30)
+    result = await worker.generate("Smooth yacht rock with soft, soulful vocals, groovy basslines, and lush harmonies. The vibe is easy-going and mellow, perfect for cruising on a sunny day with a relaxed, nostalgic feel", 30)
     print(f"  backend        : {result.backend}")
     print(f"  track          : {result.track_path}")
     print(f"  generation_sec : {result.generation_sec}  <-- RECORD THIS NUMBER")
