@@ -45,6 +45,19 @@ class LeaseKeyTest(unittest.TestCase):
         self.assertEqual(reaper.lease_key(None), "job:lease:")
 
 
+class PendingListTest(unittest.TestCase):
+    def test_worker_field_selects_that_workers_list(self):
+        raw = json.dumps({"job_id": "j", "worker": "macbook_air"})
+        self.assertEqual(reaper.pending_list_for(raw), "jobs:pending:macbook_air")
+
+    def test_legacy_job_stays_on_the_shared_list(self):
+        raw = json.dumps({"job_id": "j", "prompt": "x"})
+        self.assertEqual(reaper.pending_list_for(raw), "jobs:pending")
+
+    def test_bad_json_stays_on_the_shared_list(self):
+        self.assertEqual(reaper.pending_list_for("nope"), "jobs:pending")
+
+
 class DecideRequeueTest(unittest.TestCase):
     def test_lease_present_means_keep(self):
         self.assertFalse(reaper.decide_requeue(lease_exists=True))

@@ -15,7 +15,8 @@ venv/
 *.db
 *.sqlite
 *.sqlite3
-tracks/
+tracks/*
+!tracks/.gitkeep
 
 # Filler pool: audio files, the SQLite database and the now-playing file are
 # all runtime state. Same pattern as test-assets — keep the directory and its

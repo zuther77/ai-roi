@@ -76,7 +76,7 @@ Connect via Wi-Fi (plain DHCP is fine). macOS ships an NFS client.
     sudo mount_nfs -o vers=3 192.168.1.210:/srv/radio/tracks /Volumes/radio-tracks
 (If the mount is refused, retry with `-o vers=3,resvport`.) Generation runs
 natively via ACE-Step-1.5's `start_api_server_macos.sh` (Day 7 section);
-the Mac's queue-side claim runner arrives with Day 8.
+the Mac claims jobs with `python3 worker/macbook_claim.py` (Day 8).
 
 ### Linux worker
 Connect via Wi-Fi/Ethernet (plain DHCP is fine). Use native Docker (no

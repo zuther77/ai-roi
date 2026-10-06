@@ -166,8 +166,25 @@ def lease_key(job_id: str | None) -> str:
 
 
 def decide_requeue(lease_exists: bool) -> bool:
-    """A job belongs back on jobs:pending iff its lease is gone."""
+    """A job belongs back on its pending list iff its lease is gone."""
     return not lease_exists
+
+
+def pending_list_for(raw: str) -> str:
+    """Day 8: requeue onto the list of the worker that owned the job.
+
+    Jobs with no worker field (Day 4-6) stay on jobs:pending.
+    """
+    try:
+        job = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return PENDING_KEY
+    if not isinstance(job, dict):
+        return PENDING_KEY
+    worker = job.get("worker")
+    if worker in ("dell", "macbook_air"):
+        return f"jobs:pending:{worker}"
+    return PENDING_KEY
 
 
 def stats_row(raw: str) -> tuple:
@@ -249,9 +266,10 @@ def reap_expired(r: MiniRedis) -> int:
         # the job is complete and must NOT go back on jobs:pending.
         removed = r.command("LREM", IN_PROGRESS_KEY, "1", raw)
         if removed == 1:
-            r.command("RPUSH", PENDING_KEY, raw)
+            pending = pending_list_for(raw)
+            r.command("RPUSH", pending, raw)
             requeued += 1
-            log("job_requeued", job_id=job_id,
+            log("job_requeued", job_id=job_id, pending=pending,
                 reason="lease_expired" if job_id else "unparseable")
     return requeued
 

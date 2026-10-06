@@ -26,6 +26,12 @@ services:
     # The key is never written into this file, which is committed. It stays in
     # .env, which is gitignored.
     env_file: .env
+    # In-network Postgres URL. Overrides a host-oriented DATABASE_URL in .env.
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-radio}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-radio}
+      QUEUE_DIR: /app/queue
+    depends_on:
+      - postgres
 
     # Day 3: Compose restarts the container if it exits for any reason other
     # than an explicit `docker compose stop/down`. This is the crash-recovery
@@ -61,6 +67,11 @@ services:
 
       # Day 3 structured logs, readable from the host on either OS.
       - ./logs:/app/logs
+
+      # Day 8 queue store + generated tracks. TRACKS_HOST_DIR on the Linux
+      # master is /srv/radio/tracks (the NFS export). Elsewhere it is ./tracks.
+      - ./queue:/app/queue:ro
+      - ${TRACKS_HOST_DIR:-./tracks}:/srv/radio/tracks:ro
 
   # ─────────────────────────────────────────────────────────────────────────
   # Day 4 — Redis: the shared job queue between master and the DELL worker
@@ -117,6 +128,33 @@ services:
     depends_on:
       - redis
 
+  # Day 8 — Postgres. Not published on the LAN. Playout and the queue
+  # manager reach it on the Compose network.
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-radio}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-radio}
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    restart: always
+
+  queue-manager:
+    build: ./queue
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://${POSTGRES_USER:-radio}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-radio}
+      TRACKS_DIR: /srv/radio/tracks
+    volumes:
+      - ./queue:/app/queue
+    restart: always
+    depends_on:
+      - redis
+      - postgres
+
 # Named volumes for Compose services (Day 6: Redis persistence).
 volumes:
   redis-data:
+  pg-data:

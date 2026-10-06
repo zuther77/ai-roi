@@ -72,6 +72,22 @@ class PlaylistEntry:
     duration_sec: float
 
 
+@dataclass(frozen=True)
+class PlaySlot:
+    """One audio file about to be appended to the live concat pipe."""
+
+    path: str
+    duration_sec: float
+    label: str
+    queue_item_id: str | None
+
+
+# Write the next filename this many seconds before the current file ends,
+# so the concat demuxer already has it when it asks. Shorter than a stall,
+# long enough that a slow disk open is not a gap.
+PLAYLIST_LEAD_SEC = float(os.environ.get("PLAYLIST_LEAD_SEC", "5"))
+
+
 class JsonLineFormatter(logging.Formatter):
     """One JSON object per line — readable by humans and by Day 17 tooling."""
 
@@ -315,6 +331,192 @@ def start_crash_watcher() -> None:
     threading.Thread(target=_watch, name="crash-watcher", daemon=True).start()
 
 
+def open_live_store():
+    """Connect to Postgres when DATABASE_URL is set. None keeps Sprint 1 playout."""
+    url = os.environ.get("DATABASE_URL", "").strip()
+    if not url:
+        return None
+    try:
+        queue_dir = os.environ.get("QUEUE_DIR", "/app/queue")
+        if queue_dir not in sys.path:
+            sys.path.insert(0, queue_dir)
+        from store import connect
+        store = connect(url)
+        store.requeue_interrupted()
+        log_event(
+            logging.INFO, "live_queue_ready",
+            "ready tracks play at the next boundary; filler fills the gaps",
+        )
+        return store
+    except Exception as exc:
+        log_event(
+            logging.ERROR, "live_queue_unavailable",
+            f"Postgres unreachable, staying on filler playlists: {exc}",
+        )
+        return None
+
+
+def _take_live(store) -> PlaySlot | None:
+    """Claim the oldest ready item. A missing file is put back for later."""
+    claimed = store.claim_next_ready()
+    if claimed is None:
+        return None
+    path = claimed["file_path"]
+    item_id = claimed["queue_item_id"]
+    if not Path(path).is_file():
+        store.release_to_ready(item_id)
+        log_event(
+            logging.WARNING, "live_track_missing",
+            f"not on disk yet, will retry: {path}",
+            track=path,
+        )
+        return None
+    from filler_pool import probe_duration_sec
+    duration = claimed.get("duration_sec") or probe_duration_sec(path)
+    if not duration:
+        store.mark_failed(item_id)
+        log_event(
+            logging.ERROR, "live_track_unreadable",
+            f"ffprobe failed, marking failed: {path}",
+            track=path,
+        )
+        return None
+    return PlaySlot(path, float(duration), Path(path).name, item_id)
+
+
+def _take_filler(pool: FillerPool) -> PlaySlot | None:
+    track = pool.pick_and_mark_played()
+    if track is None:
+        return None
+    ok, reason = track_is_playable(track.file_path)
+    if not ok:
+        log_event(
+            logging.ERROR, "track_skipped",
+            f"skipping {Path(track.file_path).name}: {reason}",
+            track_id=track.id, track=Path(track.file_path).name, reason=reason,
+        )
+        return None
+    duration = float(track.duration_sec) if track.duration_sec else 180.0
+    return PlaySlot(track.file_path, duration, Path(track.file_path).name, None)
+
+
+def _next_slot(pool: FillerPool, store) -> PlaySlot | None:
+    # One missing live file must not block filler for this boundary. The
+    # item was released back to ready, so the following boundary tries it
+    # again. Calling claim twice here would spin if the file stays missing.
+    live = _take_live(store)
+    if live is not None:
+        return live
+    return _take_filler(pool)
+
+
+def _wait_slot(seconds: float, proc: subprocess.Popen) -> bool:
+    """Sleep, but wake if FFmpeg exits or the container is stopping."""
+    end = time.monotonic() + max(0.0, seconds)
+    while time.monotonic() < end:
+        if _shutdown_requested or proc.poll() is not None:
+            return False
+        time.sleep(min(0.5, end - time.monotonic()))
+    return proc.poll() is None
+
+
+def _write_playlist(proc: subprocess.Popen, line: str) -> None:
+    assert proc.stdin is not None
+    proc.stdin.write((line + "\n").encode())
+    proc.stdin.flush()
+
+
+def play_tailable(pool: FillerPool, store) -> int:
+    """One FFmpeg process. Filenames are appended on stdin as wall clock advances."""
+    slot = None
+    while slot is None and not _shutdown_requested:
+        slot = _next_slot(pool, store)
+        if slot is None:
+            log_event(
+                logging.WARNING, "pool_empty",
+                f"nothing ready and no filler — retrying in {EMPTY_POOL_RETRY_SEC}s",
+            )
+            time.sleep(EMPTY_POOL_RETRY_SEC)
+    if slot is None:
+        return 0
+
+    env = {
+        **os.environ,
+        "PLAYLIST_STDIN": "1",
+        "PLAYLIST_FILE": "",
+        "AUDIO_FILE": "",
+    }
+    proc = subprocess.Popen([str(STREAM_SCRIPT)], stdin=subprocess.PIPE, env=env)
+    code = 1
+    try:
+        _write_playlist(proc, "ffconcat version 1.0")
+        while slot is not None and not _shutdown_requested and proc.poll() is None:
+            # file: is required. The playlist itself is pipe:0, and a bare
+            # absolute path is then opened as pipe:/that/path.
+            _write_playlist(proc, "file " + _ffconcat_escape("file:" + slot.path))
+            log_event(
+                logging.INFO, "track_start",
+                f"playing {slot.label}",
+                track=slot.label, duration_sec=slot.duration_sec,
+            )
+            if not _wait_slot(slot.duration_sec - PLAYLIST_LEAD_SEC, proc):
+                break
+            nxt = _next_slot(pool, store)
+            while nxt is None and proc.poll() is None and not _shutdown_requested:
+                if not _wait_slot(1, proc):
+                    break
+                nxt = _next_slot(pool, store)
+            if slot.queue_item_id and nxt is not None:
+                store.mark_played(slot.queue_item_id)
+                log_event(logging.INFO, "track_end", f"finished {slot.label}", track=slot.label)
+            slot = nxt
+    except BrokenPipeError:
+        log_event(logging.ERROR, "ffmpeg_error", "playlist pipe closed", reason="broken_pipe")
+    finally:
+        if proc.stdin is not None:
+            try:
+                proc.stdin.close()
+            except BrokenPipeError:
+                pass
+        try:
+            code = proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            code = proc.wait(timeout=5)
+    return code
+
+
+def run_live_playout(pool: FillerPool, store) -> int:
+    """Keep a tailable FFmpeg session up. Restart it only when the process exits."""
+    consecutive_failures = 0
+    while not _shutdown_requested:
+        code = play_tailable(pool, store)
+        if _shutdown_requested:
+            break
+        if os.environ.get("DRY_RUN") == "1":
+            log_event(logging.INFO, "dry_run_done", "DRY_RUN complete after one gapless session",
+                      exit_code=code)
+            break
+        if code == 0:
+            consecutive_failures = 0
+            log_event(logging.INFO, "playlist_complete",
+                      "stdin playlist ended; starting another session", exit_code=code)
+        else:
+            consecutive_failures += 1
+            log_event(logging.ERROR, "ffmpeg_error",
+                      f"ffmpeg exited {code}; restarting the live playlist",
+                      exit_code=code, reason="ffmpeg_nonzero_exit")
+            time.sleep(BAD_TRACK_BACKOFF_SEC)
+        if consecutive_failures >= 5:
+            log_event(logging.ERROR, "failure_backoff",
+                      f"{consecutive_failures} consecutive session failures; sleeping 30s")
+            time.sleep(30)
+            consecutive_failures = 0
+    log_event(logging.INFO, "container_stop", "playout controller shutting down")
+    pool.close()
+    return 0
+
+
 def main() -> int:
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
@@ -350,6 +552,10 @@ def main() -> int:
             "pool_small",
             f"pool has {len(tracks)} track(s); Day 2 criteria assume at least 5",
         )
+
+    live = open_live_store()
+    if live is not None:
+        return run_live_playout(pool, live)
 
     consecutive_failures = 0
 

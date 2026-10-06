@@ -60,7 +60,11 @@ from datetime import datetime, timezone
 from ace_client import AceStepClient, extract_audio_path
 from urllib.parse import unquote, urlparse
 
-PENDING_KEY = "jobs:pending"
+# Day 8: the queue manager pushes onto a per-worker list. Override only
+# if a test still needs the Day 4 shared list.
+PENDING_KEY = os.environ.get("JOBS_PENDING_KEY", "jobs:pending:dell")
+COMPLETED_KEY = "jobs:completed"
+_busy = {"v": False}
 IN_PROGRESS_KEY = "jobs:in_progress"
 STATS_KEY = "generation:stats"
 LEASE_KEY_PREFIX = "job:lease:"
@@ -201,6 +205,42 @@ def log(event: str, **fields) -> None:
     print(json.dumps(entry), flush=True)
 
 
+def start_heartbeat(url: str, password: str) -> None:
+    """Tell the queue manager this process is up. Own socket: the claim
+    connection blocks inside BRPOPLPUSH and cannot share a client."""
+
+    def loop() -> None:
+        conn = None
+        while True:
+            try:
+                if conn is None:
+                    conn = MiniRedis(url, password)
+                conn.command(
+                    "SETEX", "worker:dell", "20",
+                    json.dumps({"busy": bool(_busy["v"])}),
+                )
+            except Exception:
+                conn = None
+            time.sleep(5)
+
+    threading.Thread(target=loop, name="heartbeat", daemon=True).start()
+
+
+def push_completed(r: MiniRedis, job: dict, file_name: str, gen_sec: float,
+                   ok: bool, error: str = "") -> None:
+    if not job.get("queue_item_id"):
+        return
+    r.command("RPUSH", COMPLETED_KEY, json.dumps({
+        "queue_item_id": job["queue_item_id"],
+        "job_id": job.get("job_id"),
+        "file_name": file_name,
+        "generation_time_sec": gen_sec,
+        "worker": "dell",
+        "ok": ok,
+        "error": error[:300],
+    }))
+
+
 def acknowledge(r: MiniRedis, raw: str) -> bool:
     """Remove the claimed job from jobs:in_progress (the ack half of the
     claim cycle — for Day 5 this is also how the job is marked complete)."""
@@ -314,6 +354,7 @@ def claim_loop(r: MiniRedis, gen: Generator) -> None:
         job_id = job.get("job_id")
         stem = safe_stem(job_id)
         write_lease(r, job)
+        _busy["v"] = True
         log("job_claimed", job_id=job_id, prompt=job.get("prompt"),
             priority=job.get("priority"))
 
@@ -326,6 +367,7 @@ def claim_loop(r: MiniRedis, gen: Generator) -> None:
             ok = acknowledge(r, raw)
             clear_lease(r, job_id)
             push_stats(r, job_id, gen_sec, job.get("target_duration_sec"))
+            push_completed(r, job, os.path.basename(path), gen_sec, True)
             # generation_sec is the measured number Sprint 3 needs; never
             # assume it (spec: workers emit measured time per completed job).
             log("job_done", job_id=job_id, track_path=path,
@@ -341,7 +383,10 @@ def claim_loop(r: MiniRedis, gen: Generator) -> None:
                     pass
             acknowledge(r, raw)
             clear_lease(r, job_id)
+            push_completed(r, job, "", 0, False, str(exc))
             log("job_failed", job_id=job_id, error=str(exc)[:500])
+        finally:
+            _busy["v"] = False
 
 
 def start_health_server(state: dict) -> None:
@@ -392,6 +437,7 @@ def main() -> int:
         tracks_dir=TRACKS_DIR, api_url=ACESTEP_API_URL)
     health_state = {"gpu_available": False, "model_loaded": False}
     start_health_server(health_state)
+    start_heartbeat(url, password)
 
     try:
         ensure_tracks_mount()

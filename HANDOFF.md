@@ -26,7 +26,11 @@ start_api_server_macos.sh; DELL is ~3x that speed when it works).
 **DELL is parked by owner decision** (2026-10-04): its 1.5 re-baseline
 needs the <=6 GB VAE decode fix (ACESTEP_VAE_ON_CPU=1 +
 ACESTEP_VAE_DECODE_CHUNK_SIZE=512, in worker/README.md) but is deferred;
-we circle back later. **Day 8 (minimal Queue Manager) is next**. Networking revision
+we circle back later. **Day 8 implemented, owner verification pending**:
+Postgres queue, naive idle/alternate routing, per-worker Redis lists,
+Mac claimer (`worker/macbook_claim.py`). Playout appends a ready track
+at the next song boundary on the existing FFmpeg process. DELL stays
+parked (no heartbeat, so it is never chosen). Networking revision
 (2026-10-04, owner): the direct Ethernet link is RETIRED — every worker,
 any OS, connects over the regular LAN/Wi-Fi (spec v0.4.1). v0.4.2 (same
 day): NO router reservations — the master alone is fixed at the OS level
@@ -343,13 +347,27 @@ Do not start unless the owner asks; Option A is the Sprint 1 path.
 
 ---
 
-## 8. Next step: Day 7 - MacBook as a second worker, in isolation
+## 8. Next step: Day 8 verification, then Day 9
 
-Read `detailed-plan.md` Day 7 for tasks and acceptance criteria: the formal
-GenerationWorker interface, MacBookWorker running NATIVELY (no Docker on
-Apple Silicon - no MLX passthrough), the same turbo/2B model as DELL, a
-standalone no-queue test script, and real comparative timing data for the
-Day 8 Queue Manager. Sprint 2 is closed; Day 8 follows Day 7.
+Day 8 code is in. Owner verifies on the Linux master before Day 9
+(timing-based selection and hedging). DELL remains parked: with no
+heartbeat, every prompt goes to the MacBook.
+
+On the Linux master `.env`, set `POSTGRES_USER`, `POSTGRES_PASSWORD`,
+`POSTGRES_DB`, and `TRACKS_HOST_DIR=/srv/radio/tracks`. Then:
+
+```sh
+docker compose up -d --build
+# on the Mac, with the ACE-Step server already up and NFS mounted:
+set -a; source .env; set +a
+python3 worker/macbook_claim.py
+# on the master:
+docker compose run --rm queue-manager python /app/queue/insert_prompt.py "lo-fi hip hop beat"
+```
+
+Expect `item_assigned` to `macbook_air`, then `item_ready`, then the
+playout log `track_start` for that file at the next filler boundary.
+No RTMP reconnect between songs. Filler continues while the queue is empty.
 
 ---
 

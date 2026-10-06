@@ -24,6 +24,10 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
+# Day 8: playout claims ready rows from Postgres. psycopg bundles libpq,
+# so the image still needs nothing installed on the host.
+RUN pip install --no-cache-dir "psycopg[binary]"
+
 WORKDIR /app
 
 # Flush print/logging output immediately instead of buffering it.

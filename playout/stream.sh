@@ -48,10 +48,16 @@ fi
 # Gapless (Option A): PLAYLIST_FILE is an ffconcat list written by the
 # controller. Single-file: AUDIO_FILE is one mp3.
 PLAYLIST_FILE="${PLAYLIST_FILE:-}"
+# Day 8: the controller writes ffconcat lines on stdin while FFmpeg runs,
+# so a ready live track can be appended at the next boundary without
+# reconnecting RTMP. The pre-scale ffmpeg below must not read that stdin.
+PLAYLIST_STDIN="${PLAYLIST_STDIN:-0}"
 AUDIO_FILE="${AUDIO_FILE:-/app/test-assets/track.mp3}"
 IMAGE_FILE="${IMAGE_FILE:-/app/test-assets/image.jpg}"
 
-if [[ -n "$PLAYLIST_FILE" ]]; then
+if [[ "$PLAYLIST_STDIN" == "1" ]]; then
+    :
+elif [[ -n "$PLAYLIST_FILE" ]]; then
     if [[ ! -f "$PLAYLIST_FILE" ]]; then
         echo "ERROR: no concat playlist at ${PLAYLIST_FILE}" >&2
         exit 1
@@ -100,7 +106,7 @@ RTMP_TARGET="${YOUTUBE_RTMP_URL%/}/${YOUTUBE_STREAM_KEY:-}"
 # Filter-graph loop=-1 without pacing → Mbps flood → "No data".
 # Fix: scale once, then paced demuxer loop on the small JPEG.
 PRESCALED_IMAGE="/tmp/playout-image.jpg"
-ffmpeg -hide_banner -loglevel error \
+ffmpeg -nostdin -hide_banner -loglevel error \
     -i "$IMAGE_FILE" \
     -vf "scale=${VIDEO_WIDTH}:${VIDEO_HEIGHT}:force_original_aspect_ratio=decrease,pad=${VIDEO_WIDTH}:${VIDEO_HEIGHT}:(ow-iw)/2:(oh-ih)/2" \
     -frames:v 1 -y "$PRESCALED_IMAGE"
@@ -118,7 +124,13 @@ FFMPEG_ARGS=(
     -re -loop 1 -framerate "$FRAMERATE" -i "$PRESCALED_IMAGE"
 )
 
-if [[ -n "$PLAYLIST_FILE" ]]; then
+if [[ "$PLAYLIST_STDIN" == "1" ]]; then
+    # Playlist text arrives on stdin and is extended while we run. Media
+    # files themselves are ordinary paths named by each `file` line.
+    FFMPEG_ARGS+=(
+        -re -f concat -safe 0 -protocol_whitelist file,pipe,crypto -i pipe:0
+    )
+elif [[ -n "$PLAYLIST_FILE" ]]; then
     # --- Input 1: concat playlist (Option A gapless) ------------------------
     # One FFmpeg process owns the RTMP socket for the whole playlist. Tracks
     # advance inside the concat demuxer — no reconnect between songs.
@@ -162,7 +174,7 @@ FFMPEG_ARGS+=(
 # -shortest: image loops forever; end when audio (playlist or single file) ends.
 # Always needed in playlist mode. In single-file mode, only when STREAM_LOOP
 # is finite (same as Day 1–2).
-if [[ -n "$PLAYLIST_FILE" || "$STREAM_LOOP" != "-1" ]]; then
+if [[ "$PLAYLIST_STDIN" == "1" || -n "$PLAYLIST_FILE" || "$STREAM_LOOP" != "-1" ]]; then
     FFMPEG_ARGS+=( -shortest )
 fi
 
@@ -176,7 +188,9 @@ fi
 # ---------------------------------------------------------------------------
 # 5. Go
 # ---------------------------------------------------------------------------
-if [[ -n "$PLAYLIST_FILE" ]]; then
+if [[ "$PLAYLIST_STDIN" == "1" ]]; then
+    echo "playout: mode   gapless concat, playlist on stdin (Day 8)"
+elif [[ -n "$PLAYLIST_FILE" ]]; then
     echo "playout: mode   gapless concat (Option A)"
     echo "playout: audio  playlist ${PLAYLIST_FILE}"
 else
