@@ -69,10 +69,12 @@ documented in Run (in-container NFS mount, `--cap-add SYS_ADMIN`) apply
 identically over Wi-Fi.
 
 ### macOS worker (native — MLX)
-Connect via Wi-Fi (plain DHCP is fine). macOS ships an NFS client:
-    sudo mkdir -p /mnt/radio-tracks
-    sudo mount_nfs 192.168.1.210:/srv/radio/tracks /mnt/radio-tracks
-(If the mount is refused, retry with `-o resvport`.) Generation runs
+Connect via Wi-Fi (plain DHCP is fine). macOS ships an NFS client.
+`/mnt` does not exist and `/` is read-only, so the mount point is
+`/Volumes` (full commands in `worker/setup.md`):
+    sudo mkdir -p /Volumes/radio-tracks
+    sudo mount_nfs -o vers=3 192.168.1.210:/srv/radio/tracks /Volumes/radio-tracks
+(If the mount is refused, retry with `-o vers=3,resvport`.) Generation runs
 natively via ACE-Step-1.5's `start_api_server_macos.sh` (Day 7 section);
 the Mac's queue-side claim runner arrives with Day 8.
 
