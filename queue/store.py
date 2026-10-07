@@ -137,7 +137,14 @@ class QueueStore:
         )
 
     def mark_ready(self, item_id: str, file_path: str, source: str,
-                   generation_time_sec: float, duration_sec: float | None = None) -> None:
+                   generation_time_sec: float, duration_sec: float | None = None) -> bool:
+        """First generating -> ready wins. A hedge loser finds the row already ready."""
+        cur = self._exec(
+            "UPDATE queue_items SET status = 'ready' WHERE id = ? AND status = 'generating'",
+            (item_id,),
+        )
+        if cur.rowcount != 1:
+            return False
         track_id = str(uuid.uuid4())
         self._exec(
             "INSERT INTO tracks"
@@ -146,12 +153,18 @@ class QueueStore:
             (track_id, file_path, duration_sec, source, float(generation_time_sec)),
         )
         self._exec(
-            "UPDATE queue_items SET status = 'ready', track_id = ? WHERE id = ?",
+            "UPDATE queue_items SET track_id = ? WHERE id = ?",
             (track_id, item_id),
         )
+        return True
 
-    def mark_failed(self, item_id: str) -> None:
-        self._exec("UPDATE queue_items SET status = 'failed' WHERE id = ?", (item_id,))
+    def mark_failed(self, item_id: str) -> bool:
+        """Fail only a row that is still generating. A ready hedge winner stays ready."""
+        cur = self._exec(
+            "UPDATE queue_items SET status = 'failed' WHERE id = ? AND status = 'generating'",
+            (item_id,),
+        )
+        return cur.rowcount == 1
 
     def mark_played(self, item_id: str) -> None:
         self._exec(
@@ -205,6 +218,30 @@ class QueueStore:
     def requeue_interrupted(self) -> None:
         """A crash mid-play must not drop the item. Next start airs it again."""
         self._exec("UPDATE queue_items SET status = 'ready' WHERE status = 'playing'")
+
+    def open_depth(self) -> int:
+        """Queued, generating, and ready. Played and failed are out of the buffer."""
+        row = self._one(
+            "SELECT COUNT(*) AS n FROM queue_items"
+            " WHERE status IN ('queued', 'generating', 'ready')"
+        )
+        return int(row["n"])
+
+    def average_track_sec(self) -> float | None:
+        """Mean measured duration of generated tracks. None until one exists."""
+        row = self._one(
+            "SELECT AVG(duration_sec) AS avg_sec FROM tracks"
+            " WHERE duration_sec IS NOT NULL AND duration_sec > 0 AND is_filler = 0"
+        )
+        if row is None or row["avg_sec"] is None:
+            return None
+        return float(row["avg_sec"])
+
+    def set_deadline(self, item_id: str, deadline_at: str) -> None:
+        self._exec(
+            "UPDATE queue_items SET deadline_at = ? WHERE id = ?",
+            (deadline_at, item_id),
+        )
 
     def last_assigned_worker(self) -> str | None:
         row = self._one(

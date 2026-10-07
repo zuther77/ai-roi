@@ -65,6 +65,20 @@ class QueueStoreTest(unittest.TestCase):
         self.store.mark_generating(item["id"], "macbook_air")
         self.assertEqual(self.store.last_assigned_worker(), "macbook_air")
 
+    def test_second_ready_from_a_hedge_loser_does_not_apply(self):
+        item = self.store.enqueue("race")
+        self.store.mark_generating(item["id"], "macbook_air")
+        self.assertTrue(self.store.mark_ready(
+            item["id"], file_path="/srv/radio/tracks/a.wav",
+            source="macbook_air", generation_time_sec=95.0,
+        ))
+        self.assertFalse(self.store.mark_ready(
+            item["id"], file_path="/srv/radio/tracks/b.wav",
+            source="dell", generation_time_sec=400.0,
+        ))
+        claimed = self.store.claim_next_ready()
+        self.assertEqual(claimed["file_path"], "/srv/radio/tracks/a.wav")
+
     def test_mark_failed(self):
         item = self.store.enqueue("nope")
         self.store.mark_generating(item["id"], "dell")

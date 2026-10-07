@@ -114,6 +114,12 @@ def main() -> int:
                 "EX", str(lease_sec),
             )
             log("job_claimed", job_id=job_id, prompt=str(job.get("prompt") or "")[:120])
+            if redis.command("GET", "job:cancel:" + job_id):
+                redis.command("LREM", IN_PROGRESS_KEY, "1", raw)
+                redis.command("DEL", LEASE_PREFIX + job_id)
+                log("job_cancelled", job_id=job_id, reason="hedge_lost")
+                busy["v"] = False
+                continue
             try:
                 result = asyncio.run(worker.generate(
                     job.get("prompt") or "",

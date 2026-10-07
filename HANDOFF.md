@@ -26,11 +26,12 @@ start_api_server_macos.sh; DELL is ~3x that speed when it works).
 **DELL is parked by owner decision** (2026-10-04): its 1.5 re-baseline
 needs the <=6 GB VAE decode fix (ACESTEP_VAE_ON_CPU=1 +
 ACESTEP_VAE_DECODE_CHUNK_SIZE=512, in worker/README.md) but is deferred;
-we circle back later. **Day 8 implemented, owner verification pending**:
-Postgres queue, naive idle/alternate routing, per-worker Redis lists,
-Mac claimer (`worker/macbook_claim.py`). Playout appends a ready track
-at the next song boundary on the existing FFmpeg process. DELL stays
-parked (no heartbeat, so it is never chosen). Networking revision
+we circle back later. **Day 8 owner-verified (2026-10-06)**: the MacBook claimed a job from
+the master, wrote the file onto the master NFS export, and playout
+aired it on YouTube after the current filler song. One FFmpeg, no
+reconnect. **Day 9 implemented, owner verification pending**: timing
+selection and hedging (`queue/timing.py`). DELL stays parked (no
+heartbeat, so it is never chosen and never a hedge partner). Networking revision
 (2026-10-04, owner): the direct Ethernet link is RETIRED — every worker,
 any OS, connects over the regular LAN/Wi-Fi (spec v0.4.1). v0.4.2 (same
 day): NO router reservations — the master alone is fixed at the OS level
@@ -74,8 +75,9 @@ Desktop networking or macOS-as-NFS-server.
 **Before Day 4 — Linux master checklist (owner):**
 1. Clone `https://github.com/zuther77/ai-roi` on the Linux box; copy `.env`
    (stream key) and `filler-pool/` / `test-assets/` media from the Mac (or
-   re-seed filler audio). Specs (`design-spec.md`, `detailed-plan.md`) live
-   *beside* the repo if you keep the same layout — they are not in git.
+   re-seed filler audio). Specs (`design-spec.md`, `detailed-plan.md`,
+   `queue-item-module-spec.md`) live *beside* the repo if you keep the same
+   layout — they are not in git. The queue-item spec is not built yet.
 2. Install Docker Engine + Compose plugin (not Docker Desktop).
 3. `docker compose up -d --build` and confirm filler stream still reaches
    YouTube (Sprint 1 regression).
@@ -336,38 +338,36 @@ retention, #7 Gemini spend cap, `SAFETY_MARGIN_SEC` (Day 9, ~120s as config).
 
 ## 7. Future work
 
-### Option B — FIFO / permanent FFmpeg (not started)
+### PCM fifo playout (live path)
 
-Owner deferred. True infinite gapless without playlist rebuilds: keep one
-FFmpeg forever reading raw audio from a named pipe (or similar), while the
-controller writes decoded PCM for each next track into the FIFO. Static image
-input stays continuous; audio never ends so RTMP never reconnects on playlist
-exhaustion. More moving parts (pipe lifetime, backpressure, format lock).
-Do not start unless the owner asks; Option A is the Sprint 1 path.
+The Day 8 stdin playlist never sent RTMP bytes: FFmpeg waits for the
+playlist to end. Playout now writes PCM into a fifo
+(`/tmp/playout-pcm.fifo`) and one FFmpeg reads it. Owner heard a
+generated song on YouTube after filler (2026-10-06). Do not put the
+concat playlist back on stdin.
 
 ---
 
-## 8. Next step: Day 8 verification, then Day 9
+## 8. Next step: Day 9 owner verification
 
-Day 8 code is in. Owner verifies on the Linux master before Day 9
-(timing-based selection and hedging). DELL remains parked: with no
-heartbeat, every prompt goes to the MacBook.
+Day 9 code is in. Selection uses each worker's rolling average from
+`generation_stats` (last 20). Logs `source_chosen` with the latencies,
+the time budget, the queue depth, the policy, and `naive_worker` (what
+Day 8 would have picked). `SAFETY_MARGIN_SEC` defaults to 120.
 
-On the Linux master `.env`, set `POSTGRES_USER`, `POSTGRES_PASSWORD`,
-`POSTGRES_DB`, and `TRACKS_HOST_DIR=/srv/radio/tracks`. Then:
+DELL is parked, so a live item goes to `macbook_air` and `hedge_worker`
+is null. Hedging the other machine shows up in unit tests, and on the
+master only after DELL publishes `worker:dell` again.
 
 ```sh
-docker compose up -d --build
-# on the Mac, with the ACE-Step server already up and NFS mounted:
-set -a; source .env; set +a
-python3 worker/macbook_claim.py
-# on the master:
-docker compose run --rm queue-manager python /app/queue/insert_prompt.py "lo-fi hip hop beat"
+docker compose up -d --build queue-manager
+docker compose logs -f queue-manager
 ```
 
-Expect `item_assigned` to `macbook_air`, then `item_ready`, then the
-playout log `track_start` for that file at the next filler boundary.
-No RTMP reconnect between songs. Filler continues while the queue is empty.
+Insert a prompt the same way as Day 8. Expect `source_chosen` then
+`item_assigned` to `macbook_air`, then the song on YouTube after the
+current filler song. A deep buffer (10 or more queued/generating/ready)
+logs `single_worker_per_item`. Below 5 it logs `hedge_aggressively`.
 
 ---
 

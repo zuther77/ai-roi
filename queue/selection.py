@@ -1,7 +1,8 @@
-"""Day 8 worker choice. Idle and healthy wins; otherwise alternate.
+"""Naive worker choice. Idle and healthy wins; otherwise alternate.
 
-No deadlines and no hedging — that is Day 9. A worker with no heartbeat is
-unhealthy (DELL stays parked until it starts publishing one again).
+Day 9's live path is timing.plan_assignment. This function stays so each
+assignment can log what the naive rule would have picked. A worker with
+no heartbeat is unhealthy (DELL stays parked until it publishes one).
 """
 
 from __future__ import annotations

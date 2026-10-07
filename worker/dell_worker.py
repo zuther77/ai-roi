@@ -358,6 +358,13 @@ def claim_loop(r: MiniRedis, gen: Generator) -> None:
         log("job_claimed", job_id=job_id, prompt=job.get("prompt"),
             priority=job.get("priority"))
 
+        if r.command("GET", "job:cancel:" + str(job_id)):
+            acknowledge(r, raw)
+            clear_lease(r, job_id)
+            log("job_cancelled", job_id=job_id, reason="hedge_lost")
+            _busy["v"] = False
+            continue
+
         try:
             path, gen_sec = gen.generate(
                 prompt=job.get("prompt", ""),
