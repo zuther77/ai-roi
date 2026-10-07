@@ -154,6 +154,24 @@ services:
       - redis
       - postgres
 
+  # Day 10 — prompt form. Same image as the queue manager. Serves the page
+  # and POST /prompts. Does not generate. Bind is the host interface the
+  # browser uses; 0.0.0.0 is the default so a laptop on the LAN can open it.
+  intake:
+    build: ./queue
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-radio}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-radio}
+      INTAKE_PORT: "8080"
+    ports:
+      - "${INTAKE_BIND:-0.0.0.0}:8080:8080"
+    volumes:
+      - ./queue:/app/queue:ro
+    command: ["python", "-u", "/app/queue/intake.py"]
+    restart: always
+    depends_on:
+      - postgres
+
 # Named volumes for Compose services (Day 6: Redis persistence).
 volumes:
   redis-data:

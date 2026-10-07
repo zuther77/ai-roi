@@ -1,4 +1,4 @@
-"""Insert one prompt into the live queue. The web form does not exist yet.
+"""Insert one prompt from the shell. The normal path is the Day 10 form.
 
     docker compose run --rm queue-manager python /app/queue/insert_prompt.py "lo-fi hip hop"
 """

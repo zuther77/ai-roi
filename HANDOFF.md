@@ -29,8 +29,8 @@ ACESTEP_VAE_DECODE_CHUNK_SIZE=512, in worker/README.md) but is deferred;
 we circle back later. **Day 8 owner-verified (2026-10-06)**: the MacBook claimed a job from
 the master, wrote the file onto the master NFS export, and playout
 aired it on YouTube after the current filler song. One FFmpeg, no
-reconnect. **Day 9 implemented, owner verification pending**: timing
-selection and hedging (`queue/timing.py`). DELL stays parked (no
+reconnect. **Day 9 owner-verified (2026-10-06)**: timing selection and hedging.
+Manual checks passed on the Linux master. DELL stays parked (no
 heartbeat, so it is never chosen and never a hedge partner). Networking revision
 (2026-10-04, owner): the direct Ethernet link is RETIRED — every worker,
 any OS, connects over the regular LAN/Wi-Fi (spec v0.4.1). v0.4.2 (same
@@ -348,26 +348,23 @@ concat playlist back on stdin.
 
 ---
 
-## 8. Next step: Day 9 owner verification
+## 8. Next step: Day 10 owner verification
 
-Day 9 code is in. Selection uses each worker's rolling average from
-`generation_stats` (last 20). Logs `source_chosen` with the latencies,
-the time budget, the queue depth, the policy, and `naive_worker` (what
-Day 8 would have picked). `SAFETY_MARGIN_SEC` defaults to 120.
-
-DELL is parked, so a live item goes to `macbook_air` and `hedge_worker`
-is null. Hedging the other machine shows up in unit tests, and on the
-master only after DELL publishes `worker:dell` again.
+Day 9 is owner-verified (2026-10-06). Day 10 is implemented, not yet
+owner-verified. The form is `intake` in Compose, port 8080. `POST /prompts`
+inserts a queue row and returns the position. It does not generate.
+The queue manager still assigns the row. DELL stays parked. The shell
+script `insert_prompt.py` still works; the form is the path to test.
 
 ```sh
-docker compose up -d --build queue-manager
-docker compose logs -f queue-manager
+docker compose up -d --build intake
 ```
 
-Insert a prompt the same way as Day 8. Expect `source_chosen` then
-`item_assigned` to `macbook_air`, then the song on YouTube after the
-current filler song. A deep buffer (10 or more queued/generating/ready)
-logs `single_worker_per_item`. Below 5 it logs `hedge_aggressively`.
+Open `http://192.168.1.210:8080`. Submit a short prompt. The page should
+say `Queued at position N` immediately. Then the usual `source_chosen`,
+Mac generation, and YouTube after the current filler song. An empty box
+and a paste longer than 1000 characters must show an error and must not
+create a queue row.
 
 ---
 
