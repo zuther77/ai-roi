@@ -348,11 +348,24 @@ concat playlist back on stdin.
 
 ---
 
-## 8. Next step: Day 11 — moderation
+## 8. Next step: Day 12 — rate limiting and abuse basics
 
-Day 10 is owner-verified (2026-10-07). The form at port 8080 enqueues a prompt and the song airs.
+Day 11 is owner-verified (2026-10-07): moderation runs inside POST /prompts
+before enqueue. A harmful prompt is rejected by the OpenAI moderation call; a
+real-artist / copyrighted-song request is rejected by the always-on keyword
+block (and, when configured, an optional OpenAI-compatible bring-your-own LLM
+check); "X-style" phrasing is allowed; a normal prompt still returns sub-second;
+rejected prompts are logged (`prompt_rejected`) and persisted with
+moderation_status='rejected'. OPENAI_API_KEY is now REQUIRED for intake —
+the `intake` service fails closed at startup without it, while playout and the
+stream-never-stops guarantee are unaffected (the "zero API keys" promise was
+corrected in design-spec §1/§3.2, README, and .env.example to say streaming
+needs no keys but prompt intake needs a moderation key). Open Question #1
+(artist/style policy) is resolved: full block, keyword-based, Option X for the
+optional LLM. DELL stays parked.
 
-Day 11 filters `POST /prompts` before the row is inserted. A harmful prompt is rejected by a moderation call. A request to copy a real artist or song is rejected by a second check. The page shows the specific reason. A normal prompt still returns in well under a second. Rejected prompts are logged. DELL stays parked.
+Day 12 adds per-source rate limiting on POST /prompts (Redis TTL cooldown, HTTP
+429 with retry-after) plus basic input sanitization. DELL stays parked.
 
 ---
 
