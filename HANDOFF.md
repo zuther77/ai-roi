@@ -350,7 +350,7 @@ concat playlist back on stdin.
 
 ## 8. Next step: Day 13 — optional paid providers (Sprint 5 begins)
 
-Day 12 is implemented (owner-verification pending): per-source rate limiting on
+Day 12 is owner-verified (2026-10-07): per-source rate limiting on
 POST /prompts. One prompt per source per cooldown window (`PROMPT_COOLDOWN_SEC`,
 default 120s) via an atomic Redis `SET <key> 1 NX EX`, HTTP 429 with a
 "try again in N seconds" message on excess, and TTL read for the countdown.
