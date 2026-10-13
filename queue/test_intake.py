@@ -1,4 +1,6 @@
-"""Day 10 prompt intake. SQLite stands in for Postgres. No worker is called."""
+"""Day 10 prompt intake + Day 11 moderation wiring. SQLite stands in for
+Postgres. No worker is called. A fake moderation transport keeps these tests
+offline — clean prompts are allowed, so Day 10's enqueue behavior is preserved."""
 
 from __future__ import annotations
 
@@ -12,6 +14,15 @@ from http.server import HTTPServer
 
 from intake import accept_prompt, make_handler, prompt_error
 from store import QueueStore
+
+# Moderation needs a key present and a transport. These keep intake tests
+# offline: the fake transport returns "not flagged" so a clean prompt flows
+# through exactly as it did in Day 10.
+MOD_ENV = {"OPENAI_API_KEY": "sk-test"}
+
+
+def allow_post(url, headers, payload):
+    return {"results": [{"flagged": False, "categories": {}}]}
 
 
 def memory_store() -> QueueStore:
@@ -39,7 +50,8 @@ class PromptErrorTest(unittest.TestCase):
 class AcceptPromptTest(unittest.TestCase):
     def test_enqueue_returns_position_and_stays_queued(self):
         store = memory_store()
-        status, body = accept_prompt(store, "  rain on a tin roof  ")
+        status, body = accept_prompt(store, "  rain on a tin roof  ",
+                                     env=MOD_ENV, post=allow_post)
         self.assertEqual(status, 200)
         self.assertEqual(body["queue_position"], 1)
         self.assertEqual(body["status"], "queued")
@@ -49,16 +61,37 @@ class AcceptPromptTest(unittest.TestCase):
 
     def test_invalid_does_not_enqueue(self):
         store = memory_store()
-        status, body = accept_prompt(store, "x" * 5000)
+        status, body = accept_prompt(store, "x" * 5000, env=MOD_ENV, post=allow_post)
         self.assertEqual(status, 400)
         self.assertIn("1000", body["error"])
+        self.assertIsNone(store.next_queued())
+
+    def test_keyword_rejection_does_not_enqueue_and_records_rejected(self):
+        store = memory_store()
+        status, body = accept_prompt(store, "cover of Bohemian Rhapsody",
+                                     env=MOD_ENV, post=allow_post)
+        self.assertEqual(status, 400)
+        self.assertIn("copyrighted song", body["error"])
+        self.assertIsNone(store.next_queued())
+
+    def test_backend_down_fails_closed_with_503(self):
+        store = memory_store()
+
+        def boom(url, headers, payload):
+            raise OSError("connection refused")
+
+        status, body = accept_prompt(store, "dreamy ambient", env=MOD_ENV, post=boom)
+        self.assertEqual(status, 503)
         self.assertIsNone(store.next_queued())
 
 
 class HttpPromptTest(unittest.TestCase):
     def setUp(self):
         self.store = memory_store()
-        self.server = HTTPServer(("127.0.0.1", 0), make_handler(self.store))
+        self.server = HTTPServer(
+            ("127.0.0.1", 0),
+            make_handler(self.store, env=MOD_ENV, post=allow_post),
+        )
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.base = "http://127.0.0.1:%d" % self.server.server_address[1]
@@ -105,6 +138,12 @@ class HttpPromptTest(unittest.TestCase):
         status, body = self._post({"prompt": "y" * 5000})
         self.assertEqual(status, 400)
         self.assertIn("1000", body["error"])
+        self.assertIsNone(self.store.next_queued())
+
+    def test_server_rejects_a_named_artist(self):
+        status, body = self._post({"prompt": "a song by Taylor Swift"})
+        self.assertEqual(status, 400)
+        self.assertIn("real artist", body["error"])
         self.assertIsNone(self.store.next_queued())
 
 

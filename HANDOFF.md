@@ -30,7 +30,7 @@ we circle back later. **Day 8 owner-verified (2026-10-06)**: the MacBook claimed
 the master, wrote the file onto the master NFS export, and playout
 aired it on YouTube after the current filler song. One FFmpeg, no
 reconnect. **Day 9 owner-verified (2026-10-06)**: timing selection and hedging.
-Manual checks passed on the Linux master. DELL stays parked (no
+Manual checks passed on the Linux master. **Day 10 owner-verified (2026-10-07)**: the prompt form enqueues and the song airs. DELL stays parked (no
 heartbeat, so it is never chosen and never a hedge partner). Networking revision
 (2026-10-04, owner): the direct Ethernet link is RETIRED — every worker,
 any OS, connects over the regular LAN/Wi-Fi (spec v0.4.1). v0.4.2 (same
@@ -348,23 +348,11 @@ concat playlist back on stdin.
 
 ---
 
-## 8. Next step: Day 10 owner verification
+## 8. Next step: Day 11 — moderation
 
-Day 9 is owner-verified (2026-10-06). Day 10 is implemented, not yet
-owner-verified. The form is `intake` in Compose, port 8080. `POST /prompts`
-inserts a queue row and returns the position. It does not generate.
-The queue manager still assigns the row. DELL stays parked. The shell
-script `insert_prompt.py` still works; the form is the path to test.
+Day 10 is owner-verified (2026-10-07). The form at port 8080 enqueues a prompt and the song airs.
 
-```sh
-docker compose up -d --build intake
-```
-
-Open `http://192.168.1.210:8080`. Submit a short prompt. The page should
-say `Queued at position N` immediately. Then the usual `source_chosen`,
-Mac generation, and YouTube after the current filler song. An empty box
-and a paste longer than 1000 characters must show an error and must not
-create a queue row.
+Day 11 filters `POST /prompts` before the row is inserted. A harmful prompt is rejected by a moderation call. A request to copy a real artist or song is rejected by a second check. The page shows the specific reason. A normal prompt still returns in well under a second. Rejected prompts are logged. DELL stays parked.
 
 ---
 

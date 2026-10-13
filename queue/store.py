@@ -111,6 +111,25 @@ class QueueStore:
             "target_duration_sec": int(target_duration_sec),
         }
 
+    def record_rejected_prompt(self, prompt_text: str, source: str = "manual") -> str:
+        """Persist a moderation-rejected prompt. No queue_items row is created.
+
+        Day 11: rejected prompts are logged with enough detail to review
+        policy later (prompt text, status, time). We keep the prompt row with
+        moderation_status='rejected' rather than storing the moderation
+        backend's full raw response — the text + reason (logged to stdout by
+        intake) is what is actually useful, and keeping less is the safer
+        default for a public project.
+        """
+        now = _now()
+        prompt_id = str(uuid.uuid4())
+        self._exec(
+            "INSERT INTO prompts (id, raw_text, source, moderation_status, created_at)"
+            " VALUES (?, ?, ?, 'rejected', ?)",
+            (prompt_id, prompt_text, source, _iso(now)),
+        )
+        return prompt_id
+
     def next_queued(self) -> dict | None:
         row = self._one(
             "SELECT q.id, q.status, q.queue_position, q.target_duration_sec,"

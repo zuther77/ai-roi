@@ -1,8 +1,15 @@
-"""Day 10 prompt form. POST /prompts enqueues and returns.
+"""Day 10 prompt form + Day 11 moderation. POST /prompts moderates, then enqueues.
 
 It does not generate audio and it does not wait for a worker. The queue
 manager process assigns the row later. The page is served by this same
 process, so the browser and the endpoint share one origin.
+
+Day 11: every prompt is moderated BEFORE it is enqueued (design-spec
+Section 3.2). The harmful-content check requires OPENAI_API_KEY, so this
+service fails closed at startup if the key is missing (require_moderation_config).
+A rejected prompt is persisted with moderation_status='rejected', logged
+with its reason, and the user gets that specific reason back — never a
+silent drop. The stream itself needs no keys; this gate is intake-only.
 
 The 1000-character cap matches worker/base.py MAX_PROMPT_CHARS. A prompt
 the form accepts is a prompt the worker will accept.
@@ -12,8 +19,15 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+from moderation import (
+    ModerationConfigError,
+    ModerationUnavailable,
+    moderate_prompt,
+    require_moderation_config,
+)
 from store import QueueStore, connect
 
 MAX_PROMPT_CHARS = 1000
@@ -102,16 +116,40 @@ def prompt_error(text: object) -> str | None:
     return None
 
 
-def accept_prompt(store: QueueStore, text: object) -> tuple[int, dict]:
-    """Insert one queue item. Returns an HTTP status and a JSON body.
+def _log(event: str, **fields) -> None:
+    entry = {"ts": datetime.now(timezone.utc).isoformat(), "event": event}
+    entry.update(fields)
+    print(json.dumps(entry, default=str), flush=True)
 
-    This function does not call a worker. The row stays queued until the
-    queue manager assigns it.
+
+def accept_prompt(store: QueueStore, text: object, *, env: dict | None = None,
+                  post=None) -> tuple[int, dict]:
+    """Moderate, then insert one queue item. Returns an HTTP status + JSON body.
+
+    This function does not call a worker. On approval the row stays queued
+    until the queue manager assigns it. On rejection nothing is enqueued; the
+    prompt is persisted as rejected and the specific reason is returned.
     """
     error = prompt_error(text)
     if error:
         return 400, {"error": error}
-    item = store.enqueue(str(text).strip(), source=SOURCE)
+    cleaned = str(text).strip()
+
+    try:
+        verdict = moderate_prompt(cleaned, env=env, post=post)
+    except ModerationUnavailable as exc:
+        # Fail closed: the required backend is down, so we refuse rather than
+        # enqueue un-screened text. 503 tells the user to try again.
+        _log("moderation_unavailable", error=str(exc)[:300])
+        return 503, {"error": "Moderation is temporarily unavailable. Please try again."}
+
+    if not verdict.allowed:
+        prompt_id = store.record_rejected_prompt(cleaned, source=SOURCE)
+        _log("prompt_rejected", prompt_id=prompt_id, category=verdict.category,
+             reason=verdict.reason, prompt=cleaned[:200])
+        return 400, {"error": verdict.reason}
+
+    item = store.enqueue(cleaned, source=SOURCE)
     return 200, {
         "id": item["id"],
         "queue_position": item["queue_position"],
@@ -119,7 +157,7 @@ def accept_prompt(store: QueueStore, text: object) -> tuple[int, dict]:
     }
 
 
-def make_handler(store: QueueStore):
+def make_handler(store: QueueStore, *, env: dict | None = None, post=None):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             if self.path.split("?", 1)[0] != "/":
@@ -151,7 +189,7 @@ def make_handler(store: QueueStore):
             except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError):
                 self._json(400, {"error": "Send JSON with a prompt field."})
                 return
-            status, body = accept_prompt(store, text)
+            status, body = accept_prompt(store, text, env=env, post=post)
             self._json(status, body)
 
         def _json(self, status: int, body: dict) -> None:
@@ -177,10 +215,15 @@ def main() -> int:
     if not url:
         print("DATABASE_URL is not set", flush=True)
         return 2
+    try:
+        require_moderation_config()
+    except ModerationConfigError as exc:
+        _log("intake_start_error", reason=str(exc))
+        return 3
     port = int(os.environ.get("INTAKE_PORT", "8080"))
     store = open_store(url)
     server = HTTPServer(("0.0.0.0", port), make_handler(store))
-    print(json.dumps({"event": "intake_start", "port": port}), flush=True)
+    _log("intake_start", port=port, moderation="required")
     server.serve_forever()
     return 0
 
