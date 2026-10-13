@@ -348,24 +348,28 @@ concat playlist back on stdin.
 
 ---
 
-## 8. Next step: Day 12 — rate limiting and abuse basics
+## 8. Next step: Day 13 — optional paid providers (Sprint 5 begins)
 
-Day 11 is owner-verified (2026-10-07): moderation runs inside POST /prompts
-before enqueue. A harmful prompt is rejected by the OpenAI moderation call; a
-real-artist / copyrighted-song request is rejected by the always-on keyword
-block (and, when configured, an optional OpenAI-compatible bring-your-own LLM
-check); "X-style" phrasing is allowed; a normal prompt still returns sub-second;
-rejected prompts are logged (`prompt_rejected`) and persisted with
-moderation_status='rejected'. OPENAI_API_KEY is now REQUIRED for intake —
-the `intake` service fails closed at startup without it, while playout and the
-stream-never-stops guarantee are unaffected (the "zero API keys" promise was
-corrected in design-spec §1/§3.2, README, and .env.example to say streaming
-needs no keys but prompt intake needs a moderation key). Open Question #1
-(artist/style policy) is resolved: full block, keyword-based, Option X for the
-optional LLM. DELL stays parked.
+Day 12 is implemented (owner-verification pending): per-source rate limiting on
+POST /prompts. One prompt per source per cooldown window (`PROMPT_COOLDOWN_SEC`,
+default 120s) via an atomic Redis `SET <key> 1 NX EX`, HTTP 429 with a
+"try again in N seconds" message on excess, and TTL read for the countdown.
+Source = client IP, or an `X-Client-Id` request header when present (shared-NAT
+help; advisory only). The rate check runs BEFORE moderation so a spammer cannot
+burn the moderation API call. The limiter FAILS OPEN: if Redis is unreachable,
+submissions still work (abuse mitigation, not a safety gate — contrast
+moderation's fail-closed). Input sanitization added: control characters are
+stripped before validation, so a control-char-only prompt reads as empty.
+`queue/ratelimit.py` is new (its own stdlib MiniRedis, like reaper.py); the
+`intake` Compose service now has `REDIS_URL` + `depends_on: redis`. Unit tests:
+127 across the repo (ratelimit + intake sanitization/429/fail-open added). DELL
+stays parked.
 
-Day 12 adds per-source rate limiting on POST /prompts (Redis TTL cooldown, HTTP
-429 with retry-after) plus basic input sanitization. DELL stays parked.
+Sprint 4 closes here: a stranger can submit through the form, be rate-limited,
+sanitized, moderated, fairly queued, and aired. Day 13 begins Sprint 5 — the
+optional ElevenLabs / Gemini Lyra 3.5 provider adapters, built in isolation and
+genuinely optional (a clone with neither key set must be unaffected: the single
+most important check of that sprint). DELL stays parked.
 
 ---
 

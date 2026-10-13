@@ -163,6 +163,9 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-radio}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-radio}
       INTAKE_PORT: "8080"
+      # Day 12: rate limiting shares the master's Redis (in-network address;
+      # REDIS_PASSWORD comes from .env via env_file).
+      REDIS_URL: redis://redis:6379/0
     ports:
       - "${INTAKE_BIND:-0.0.0.0}:8080:8080"
     volumes:
@@ -171,6 +174,7 @@ services:
     restart: always
     depends_on:
       - postgres
+      - redis
 
 # Named volumes for Compose services (Day 6: Redis persistence).
 volumes:
