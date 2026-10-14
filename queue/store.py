@@ -45,6 +45,22 @@ SCHEMA = (
         assigned_at TEXT
     )
     """,
+    # Day 13: paid-provider usage/quota (design-spec Section 4). Only
+    # populated/relevant in hybrid/paid_only modes; a local_only clone never
+    # writes a row. window_type is 'credit_balance' (ElevenLabs) or 'spend'
+    # (Gemini Lyra, when a cap is configured).
+    """
+    CREATE TABLE IF NOT EXISTS provider_quota (
+        id TEXT PRIMARY KEY,
+        provider TEXT NOT NULL,
+        window_start TEXT NOT NULL,
+        window_type TEXT NOT NULL,
+        used REAL NOT NULL DEFAULT 0,
+        quota_limit REAL,
+        last_error TEXT,
+        updated_at TEXT NOT NULL
+    )
+    """,
 )
 
 # Used only to fill deadline_at. Day 8 does not route on it.
@@ -110,6 +126,26 @@ class QueueStore:
             "prompt": prompt_text,
             "target_duration_sec": int(target_duration_sec),
         }
+
+    def log_provider_usage(self, provider: str, *, window_type: str,
+                           used: float, quota_limit: float | None = None,
+                           last_error: str | None = None) -> str:
+        """Append a provider_quota row after a paid-provider call (Day 13).
+
+        One row per call keeps it simple and auditable; a rolling balance is
+        derived by reading the latest row per provider when Day 14 needs it.
+        """
+        now = _now()
+        row_id = str(uuid.uuid4())
+        self._exec(
+            "INSERT INTO provider_quota"
+            " (id, provider, window_start, window_type, used, quota_limit,"
+            "  last_error, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (row_id, provider, _iso(now), window_type, float(used),
+             quota_limit, last_error, _iso(now)),
+        )
+        return row_id
 
     def record_rejected_prompt(self, prompt_text: str, source: str = "manual") -> str:
         """Persist a moderation-rejected prompt. No queue_items row is created.

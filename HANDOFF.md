@@ -348,28 +348,41 @@ concat playlist back on stdin.
 
 ---
 
-## 8. Next step: Day 13 — optional paid providers (Sprint 5 begins)
+## 8. Next step: Day 14 — wire the generation modes into the Queue Manager
 
-Day 12 is owner-verified (2026-10-07): per-source rate limiting on
-POST /prompts. One prompt per source per cooldown window (`PROMPT_COOLDOWN_SEC`,
-default 120s) via an atomic Redis `SET <key> 1 NX EX`, HTTP 429 with a
-"try again in N seconds" message on excess, and TTL read for the countdown.
-Source = client IP, or an `X-Client-Id` request header when present (shared-NAT
-help; advisory only). The rate check runs BEFORE moderation so a spammer cannot
-burn the moderation API call. The limiter FAILS OPEN: if Redis is unreachable,
-submissions still work (abuse mitigation, not a safety gate — contrast
-moderation's fail-closed). Input sanitization added: control characters are
-stripped before validation, so a control-char-only prompt reads as empty.
-`queue/ratelimit.py` is new (its own stdlib MiniRedis, like reaper.py); the
-`intake` Compose service now has `REDIS_URL` + `depends_on: redis`. Unit tests:
-127 across the repo (ratelimit + intake sanitization/429/fail-open added). DELL
-stays parked.
+Day 13 is implemented (owner-verification pending): optional paid providers,
+built IN ISOLATION (no queue/Redis/stream wiring — that is Day 14).
+`worker/providers.py` adds a `MusicProvider` ABC and two lazy, stdlib-urllib
+adapters verified against live docs via the gemini-docs MCP and the ElevenLabs
+reference:
+  * `ElevenLabsProvider` — POST /v1/music, xi-api-key, {prompt, music_length_ms,
+    model_id=music_v2_5}, MP3 bytes. Credit-based; `quota_remaining()` tracks a
+    running balance. A real-artist/song prompt returns `bad_prompt` → typed
+    `CopyrightRejected` carrying the provider's suggested alternative (the
+    provider's own copyright guard — why the Day 11 copyright LLM is a
+    local_only concern).
+  * `GeminiLyraProvider` — POST .../v1beta/models/lyria-3-clip-preview:generateContent,
+    x-goog-api-key, {contents:[{parts:[{text}]}]}, audio from
+    candidates[0].content.parts[].inlineData.data (base64 MP3, 44.1kHz stereo).
+    Pay-as-you-go; `quota_remaining()` is None unless GEMINI_LYRA_SPEND_CAP_USD
+    is set. 429/RESOURCE_EXHAUSTED → typed `QuotaExhausted`.
+Both default models are env-overridable (ELEVENLABS_MODEL / GEMINI_MODEL).
+Typed errors: `QuotaExhausted` is DISTINCT from generic `ProviderError` (Day
+14's ElevenLabs→Gemini fallback branches on it); `ProviderConfigError` for a
+missing key. `provider_quota` table + `store.log_provider_usage()` added
+(design-spec §4). `require_paid_only_config()` fails loudly at startup when
+GENERATION_MODE=paid_only with no key (edge case #31) and is a no-op in
+local_only/hybrid. Standalone owner-run scripts: `worker/try_elevenlabs.py`,
+`worker/try_gemini_lyra.py`. Unit tests: 150 repo-wide (23 new provider tests,
+mocked HTTP — no key, no network). The single most important check (app runs in
+local_only with neither key set, no provider imported/constructed) is covered by
+`configured_providers({}) == []` and the lazy-construction tests. DELL stays
+parked.
 
-Sprint 4 closes here: a stranger can submit through the form, be rate-limited,
-sanitized, moderated, fairly queued, and aired. Day 13 begins Sprint 5 — the
-optional ElevenLabs / Gemini Lyra 3.5 provider adapters, built in isolation and
-genuinely optional (a clone with neither key set must be unaffected: the single
-most important check of that sprint). DELL stays parked.
+Owner must still run the two standalone scripts with real keys (the "playable
+audio from a real prompt" criterion makes a paid call an agent cannot run).
+`queue/timing.py`'s `stub_provider_health()` is deliberately UNTOUCHED — Day 14
+replaces it and wires `choose_source()`/hedging across all three modes.
 
 ---
 

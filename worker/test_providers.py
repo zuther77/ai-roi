@@ -1,0 +1,180 @@
+"""Day 13 provider unit tests. A fake transport makes these offline: no key,
+no network, no paid call. Covers request shape, audio parsing, typed-error
+classification, quota behavior, lazy construction, and paid_only fail-loud."""
+
+from __future__ import annotations
+
+import base64
+import json
+import os
+import tempfile
+import unittest
+
+import providers as p
+from base import InvalidDurationError, InvalidPromptError
+
+
+def fake_post(status, headers, body):
+    """Build a post callable returning a fixed (status, headers, body)."""
+    def _post(url, hdrs, data):
+        _post.last = {"url": url, "headers": hdrs, "data": data}
+        return status, headers, body
+    _post.last = None
+    return _post
+
+
+class ElevenLabsRequestTest(unittest.TestCase):
+    def test_request_shape(self):
+        url, headers, body = p.build_elevenlabs_request("jazzy", 30, "music_v2_5")
+        self.assertIn("output_format=", url)
+        payload = json.loads(body)
+        self.assertEqual(payload["prompt"], "jazzy")
+        self.assertEqual(payload["music_length_ms"], 30000)
+        self.assertEqual(payload["model_id"], "music_v2_5")
+
+    def test_success_writes_file_and_measures(self):
+        post = fake_post(200, {}, b"ID3fake-mp3-bytes")
+        prov = p.ElevenLabsProvider(api_key="k", post=post)
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "a.mp3")
+            res = prov.generate("calm piano", 30, out)
+            self.assertTrue(os.path.exists(out))
+            with open(out, "rb") as f:
+                self.assertEqual(f.read(), b"ID3fake-mp3-bytes")
+        self.assertEqual(res.worker, "elevenlabs")
+        self.assertGreaterEqual(res.generation_sec, 0.0)
+        self.assertEqual(post.last["headers"]["xi-api-key"], "k")
+
+    def test_missing_key_raises_config_error(self):
+        prov = p.ElevenLabsProvider(api_key="", post=fake_post(200, {}, b"x"))
+        with self.assertRaises(p.ProviderConfigError):
+            prov.generate("calm piano", 30, "unused.mp3")
+
+    def test_bad_prompt_is_copyright_rejected_with_suggestion(self):
+        body = json.dumps({"detail": {
+            "status": "bad_prompt",
+            "prompt_suggestion": "an upbeat pop song (no artist names)",
+        }}).encode()
+        err = p.classify_elevenlabs_error(400, body)
+        self.assertIsInstance(err, p.CopyrightRejected)
+        self.assertIn("no artist names", err.suggestion)
+
+    def test_429_is_quota_exhausted(self):
+        err = p.classify_elevenlabs_error(429, b'{"detail":{}}')
+        self.assertIsInstance(err, p.QuotaExhausted)
+
+    def test_401_is_config_error(self):
+        err = p.classify_elevenlabs_error(401, b"")
+        self.assertIsInstance(err, p.ProviderConfigError)
+
+    def test_quota_remaining_from_env(self):
+        prov = p.ElevenLabsProvider(api_key="k", post=fake_post(200, {}, b"x"))
+        self.assertIsNone(prov.quota_remaining())  # unset by default
+
+
+class GeminiRequestTest(unittest.TestCase):
+    def test_request_shape(self):
+        url, headers, body = p.build_gemini_request("dreamy", "lyria-3-clip-preview", "key")
+        self.assertTrue(url.endswith("lyria-3-clip-preview:generateContent"))
+        self.assertEqual(headers["x-goog-api-key"], "key")
+        payload = json.loads(body)
+        self.assertEqual(payload["contents"][0]["parts"][0]["text"], "dreamy")
+
+    def test_extract_audio_from_inline_data(self):
+        raw = b"fake-mp3"
+        resp = json.dumps({"candidates": [{"content": {"parts": [
+            {"text": "lyrics..."},
+            {"inlineData": {"mimeType": "audio/mp3",
+                            "data": base64.b64encode(raw).decode()}},
+        ]}}]}).encode()
+        self.assertEqual(p.extract_gemini_audio(resp), raw)
+
+    def test_extract_audio_snake_case_variant(self):
+        raw = b"snake"
+        resp = json.dumps({"candidates": [{"content": {"parts": [
+            {"inline_data": {"data": base64.b64encode(raw).decode()}},
+        ]}}]}).encode()
+        self.assertEqual(p.extract_gemini_audio(resp), raw)
+
+    def test_no_audio_part_raises(self):
+        resp = json.dumps({"candidates": [{"content": {"parts": [
+            {"text": "only text"}]}}]}).encode()
+        with self.assertRaises(p.ProviderError):
+            p.extract_gemini_audio(resp)
+
+    def test_success_writes_file(self):
+        raw = b"gen-mp3"
+        resp = json.dumps({"candidates": [{"content": {"parts": [
+            {"inlineData": {"data": base64.b64encode(raw).decode()}}]}}]}).encode()
+        prov = p.GeminiLyraProvider(api_key="k", post=fake_post(200, {}, resp))
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "g.mp3")
+            res = prov.generate("lo-fi beat", 30, out)
+            with open(out, "rb") as f:
+                self.assertEqual(f.read(), raw)
+        self.assertEqual(res.worker, "gemini_lyra")
+
+    def test_resource_exhausted_is_quota(self):
+        body = json.dumps({"error": {"status": "RESOURCE_EXHAUSTED"}}).encode()
+        self.assertIsInstance(p.classify_gemini_error(200, body), p.QuotaExhausted)
+        self.assertIsInstance(p.classify_gemini_error(429, b"{}"), p.QuotaExhausted)
+
+    def test_missing_key_raises_config_error(self):
+        prov = p.GeminiLyraProvider(api_key="", post=fake_post(200, {}, b"{}"))
+        with self.assertRaises(p.ProviderConfigError):
+            prov.generate("lo-fi", 30, "unused.mp3")
+
+    def test_quota_remaining_none_without_cap(self):
+        prov = p.GeminiLyraProvider(api_key="k", post=fake_post(200, {}, b"{}"))
+        self.assertIsNone(prov.quota_remaining())
+
+    def test_quota_remaining_reflects_cap(self):
+        prov = p.GeminiLyraProvider(api_key="k", model=None, post=fake_post(200, {}, b"{}"))
+        prov._spend_cap = 5.0
+        self.assertEqual(prov.quota_remaining(), 1)
+        prov._spend_cap = 0.0
+        self.assertEqual(prov.quota_remaining(), 0)
+
+
+class ValidationTest(unittest.TestCase):
+    def test_malformed_prompt_rejected_before_network(self):
+        post = fake_post(200, {}, b"x")
+        prov = p.ElevenLabsProvider(api_key="k", post=post)
+        with self.assertRaises(InvalidPromptError):
+            prov.generate("", 30, "unused.mp3")
+        self.assertIsNone(post.last)  # never called the transport
+
+    def test_oversized_duration_rejected(self):
+        prov = p.GeminiLyraProvider(api_key="k", post=fake_post(200, {}, b"{}"))
+        with self.assertRaises(InvalidDurationError):
+            prov.generate("ok", 99999, "unused.mp3")
+
+
+class ConfigTest(unittest.TestCase):
+    def test_no_keys_means_no_configured_providers(self):
+        self.assertEqual(p.configured_providers({}), [])
+
+    def test_keys_detected(self):
+        self.assertEqual(
+            p.configured_providers({"ELEVENLABS_API_KEY": "a", "GEMINI_API_KEY": "b"}),
+            ["elevenlabs", "gemini_lyra"],
+        )
+
+    def test_local_only_never_requires_keys(self):
+        # The single most important Day 13 check: no keys, not paid_only ->
+        # nothing raised, nothing constructed.
+        p.require_paid_only_config({})
+        p.require_paid_only_config({"GENERATION_MODE": "local_only"})
+        p.require_paid_only_config({"GENERATION_MODE": "hybrid"})
+
+    def test_paid_only_without_keys_fails_loud(self):
+        with self.assertRaises(p.ProviderConfigError):
+            p.require_paid_only_config({"GENERATION_MODE": "paid_only"})
+
+    def test_paid_only_with_one_key_ok(self):
+        p.require_paid_only_config({"GENERATION_MODE": "paid_only",
+                                    "ELEVENLABS_API_KEY": "a"})
+
+
+if __name__ == "__main__":
+    unittest.main()
