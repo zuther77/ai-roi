@@ -350,7 +350,7 @@ concat playlist back on stdin.
 
 ## 8. Next step: Day 14 — wire the generation modes into the Queue Manager
 
-Day 13 is implemented (owner-verification pending): optional paid providers,
+Day 13 is owner-verified (2026-10-07): optional paid providers,
 built IN ISOLATION (no queue/Redis/stream wiring — that is Day 14).
 `worker/providers.py` adds a `MusicProvider` ABC and two lazy, stdlib-urllib
 adapters verified against live docs via the gemini-docs MCP and the ElevenLabs
