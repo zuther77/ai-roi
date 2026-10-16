@@ -18,6 +18,12 @@ venv/
 tracks/*
 !tracks/.gitkeep
 
+# Day 13 standalone provider test scripts (worker/try_elevenlabs.py,
+# worker/try_gemini_lyra.py) default to writing output into the cwd — keep
+# those owner-run generation artifacts out of git everywhere in the repo.
+*.mp3
+*.wav
+
 # Filler pool: audio files, the SQLite database and the now-playing file are
 # all runtime state. Same pattern as test-assets — keep the directory and its
 # README in git, keep everything else out.

@@ -211,10 +211,9 @@ Ordered roughly by the day/area they were decided.
 
 ---
 
-## Day 14 (pending implementation): provider execution model
+## Day 14 (implemented): provider execution model
 
 ### Option B — a provider-worker pulls provider jobs from Redis
-> Recorded here because it is decided but not yet built.
 - **Chosen:** paid-provider generations go through the same pull-based Redis job
   queue as local workers (a small `provider_worker.py` claims
   `jobs:pending:elevenlabs` / `:gemini_lyra`), rather than the manager calling the

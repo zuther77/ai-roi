@@ -350,7 +350,7 @@ concat playlist back on stdin.
 
 ## 8. Next step: Day 15 — chaos day (combined-failure testing)
 
-Day 14 is implemented (owner-verification pending): all three generation modes
+Day 14 is owner-verified (2026-10-07): all three generation modes
 wired end-to-end through the Queue Manager, via Option B (a provider-worker
 pulls provider jobs from Redis, running on the master — see TRADE_OFF.md).
 
