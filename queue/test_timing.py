@@ -222,3 +222,185 @@ class HedgePolicyTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# Day 14 — generation modes wired in
+# ---------------------------------------------------------------------------
+
+from timing import (  # noqa: E402
+    PaidOnlyMisconfigured,
+    configured_providers,
+    provider_health_from,
+    require_paid_only_config,
+    resolve_mode,
+)
+
+
+def providers_down():
+    return {
+        "elevenlabs": {"ok": False, "quota_remaining": 0},
+        "gemini_lyra": {"ok": False, "quota_remaining": None},
+    }
+
+
+def both_down():
+    return {
+        "dell": health(ok=False),
+        "macbook_air": health(ok=False),
+    }
+
+
+class ResolveModeTest(unittest.TestCase):
+    def test_unset_no_keys_is_local_only(self):
+        self.assertEqual(resolve_mode(None, []), "local_only")
+        self.assertEqual(resolve_mode("", []), "local_only")
+
+    def test_unset_with_key_auto_upgrades_to_hybrid(self):
+        self.assertEqual(resolve_mode(None, ["elevenlabs"]), "hybrid")
+
+    def test_explicit_local_only_overrides_keys(self):
+        # The documented opt-out: keys present but local_only forced.
+        self.assertEqual(resolve_mode("local_only", ["elevenlabs", "gemini_lyra"]),
+                         "local_only")
+
+    def test_explicit_values_taken_as_is(self):
+        self.assertEqual(resolve_mode("hybrid", []), "hybrid")
+        self.assertEqual(resolve_mode("paid_only", ["gemini_lyra"]), "paid_only")
+
+    def test_unknown_falls_back_to_local_only(self):
+        self.assertEqual(resolve_mode("banana", ["elevenlabs"]), "local_only")
+
+
+class ConfiguredProvidersTest(unittest.TestCase):
+    def test_none(self):
+        self.assertEqual(configured_providers({}), [])
+
+    def test_both(self):
+        self.assertEqual(
+            configured_providers({"ELEVENLABS_API_KEY": "a", "GEMINI_API_KEY": "b"}),
+            ["elevenlabs", "gemini_lyra"],
+        )
+
+
+class RequirePaidOnlyTest(unittest.TestCase):
+    def test_paid_only_no_keys_raises(self):
+        with self.assertRaises(PaidOnlyMisconfigured):
+            require_paid_only_config("paid_only", [])
+
+    def test_paid_only_with_key_ok(self):
+        require_paid_only_config("paid_only", ["elevenlabs"])
+
+    def test_local_only_and_hybrid_never_raise(self):
+        require_paid_only_config("local_only", [])
+        require_paid_only_config("hybrid", [])
+
+
+class ProviderHealthFromTest(unittest.TestCase):
+    def test_local_only_never_marks_a_provider_ok(self):
+        # The single most damaging bug guarded: even with keys + live
+        # heartbeats, local_only exposes no ok provider.
+        ph = provider_health_from(
+            "local_only",
+            {"elevenlabs": {"quota_remaining": 100}, "gemini_lyra": {}},
+            ["elevenlabs", "gemini_lyra"],
+        )
+        self.assertFalse(ph["elevenlabs"]["ok"])
+        self.assertFalse(ph["gemini_lyra"]["ok"])
+
+    def test_hybrid_marks_configured_live_provider_ok(self):
+        ph = provider_health_from(
+            "hybrid",
+            {"elevenlabs": {"quota_remaining": 100}, "gemini_lyra": None},
+            ["elevenlabs"],
+        )
+        self.assertTrue(ph["elevenlabs"]["ok"])
+        self.assertEqual(ph["elevenlabs"]["quota_remaining"], 100)
+        # Not configured + no heartbeat -> not ok.
+        self.assertFalse(ph["gemini_lyra"]["ok"])
+
+    def test_configured_but_no_heartbeat_is_not_ok(self):
+        ph = provider_health_from("hybrid", {"elevenlabs": None}, ["elevenlabs"])
+        self.assertFalse(ph["elevenlabs"]["ok"])
+
+    def test_gemini_none_quota_means_no_ceiling_and_is_ok(self):
+        ph = provider_health_from(
+            "paid_only", {"gemini_lyra": {}}, ["gemini_lyra"])
+        self.assertTrue(ph["gemini_lyra"]["ok"])
+        self.assertIsNone(ph["gemini_lyra"]["quota_remaining"])
+
+
+class ModeRoutingTest(unittest.TestCase):
+    """plan_assignment end-to-end across the three modes."""
+
+    def _plan(self, mode, worker_health, provider_health, depth=12, pos=1):
+        return plan_assignment(
+            mode=mode,
+            worker_health=worker_health,
+            provider_health=provider_health,
+            queue_depth=depth,
+            queue_position=pos,
+            avg_track_length_sec=30,
+            now=NOW,
+            naive_states=naive_both_free(),
+            last_assigned=None,
+        )
+
+    def test_local_only_ignores_healthy_providers(self):
+        ph = provider_health_from("local_only",
+                                  {"elevenlabs": {"quota_remaining": 100}},
+                                  ["elevenlabs"])
+        plan = self._plan("local_only", both_idle(1365, 95), ph)
+        self.assertEqual(plan.worker, "macbook_air")  # a local worker, never paid
+
+    def test_hybrid_falls_to_local_when_providers_present(self):
+        # Both local workers up: hybrid still prefers local (local is primary).
+        ph = provider_health_from("hybrid",
+                                  {"elevenlabs": {"quota_remaining": 100}},
+                                  ["elevenlabs"])
+        plan = self._plan("hybrid", both_idle(1365, 95), ph)
+        self.assertIn(plan.worker, ("dell", "macbook_air"))
+
+    def test_hybrid_no_local_falls_to_provider_not_filler(self):
+        # Edge case #33: hybrid with both local workers down falls to a paid
+        # provider (if one is ok), NOT straight to filler.
+        ph = provider_health_from("hybrid",
+                                  {"elevenlabs": {"quota_remaining": 100}},
+                                  ["elevenlabs"])
+        plan = self._plan("hybrid", both_down(), ph)
+        self.assertEqual(plan.worker, "elevenlabs")
+
+    def test_paid_only_routes_to_elevenlabs_first(self):
+        ph = provider_health_from(
+            "paid_only",
+            {"elevenlabs": {"quota_remaining": 100}, "gemini_lyra": {}},
+            ["elevenlabs", "gemini_lyra"],
+        )
+        plan = self._plan("paid_only", both_idle(1365, 95), ph)
+        self.assertEqual(plan.worker, "elevenlabs")  # local never touched
+
+    def test_paid_only_falls_to_gemini_when_elevenlabs_exhausted(self):
+        ph = provider_health_from(
+            "paid_only",
+            {"elevenlabs": {"quota_remaining": 0}, "gemini_lyra": {}},
+            ["elevenlabs", "gemini_lyra"],
+        )
+        plan = self._plan("paid_only", both_idle(1365, 95), ph)
+        self.assertEqual(plan.worker, "gemini_lyra")
+
+    def test_paid_only_falls_to_filler_when_both_providers_down(self):
+        # Edge case #34: paid_only with both providers down falls to FILLER,
+        # not local (deliberately different from hybrid's #33).
+        ph = provider_health_from("paid_only", {}, [])
+        plan = self._plan("paid_only", both_idle(1365, 95), ph)
+        self.assertEqual(plan.worker, "filler_pool")
+
+    def test_paid_only_hedges_elevenlabs_against_gemini_on_shallow_queue(self):
+        ph = provider_health_from(
+            "paid_only",
+            {"elevenlabs": {"quota_remaining": 100}, "gemini_lyra": {}},
+            ["elevenlabs", "gemini_lyra"],
+        )
+        plan = self._plan("paid_only", both_idle(1365, 95), ph, depth=1)
+        self.assertEqual(plan.worker, "elevenlabs")
+        self.assertEqual(plan.hedge_worker, "gemini_lyra")

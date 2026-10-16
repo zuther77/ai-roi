@@ -26,11 +26,15 @@ from selection import WorkerState
 from store import connect
 from timing import (
     FALLBACK_AVG_TRACK_SEC,
+    PROVIDERS,
     ROLLING_WINDOW,
     SAFETY_MARGIN_SEC,
+    configured_providers,
     plan_assignment,
+    provider_health_from,
+    require_paid_only_config,
+    resolve_mode,
     rolling_average,
-    stub_provider_health,
 )
 
 WORKERS = ("dell", "macbook_air")
@@ -41,7 +45,10 @@ HEARTBEAT_PREFIX = "worker:"
 CANCEL_PREFIX = "job:cancel:"
 HEDGE_SET = "hedge:items"
 STATS_DB = os.environ.get("STATS_DB", "/app/queue/generation_stats.db")
-MODE = os.environ.get("GENERATION_MODE", "local_only")
+# Mode is resolved once at startup from env + which provider keys are present
+# (design-spec Section 3.4.1); never re-evaluated per item. Set in main().
+MODE = resolve_mode(os.environ.get("GENERATION_MODE"), configured_providers(os.environ))
+CONFIGURED_PROVIDERS = configured_providers(os.environ)
 SAFETY_MARGIN = float(os.environ.get("SAFETY_MARGIN_SEC", str(SAFETY_MARGIN_SEC)))
 
 
@@ -60,6 +67,26 @@ def worker_state(r: MiniRedis, name: str) -> WorkerState:
     except json.JSONDecodeError:
         return WorkerState(name=name, healthy=True, busy=False)
     return WorkerState(name=name, healthy=True, busy=bool(body.get("busy")))
+
+
+def provider_heartbeats(r: MiniRedis) -> dict:
+    """Read worker:<provider> heartbeats. Returns {provider: parsed|None}.
+
+    The provider-worker publishes the same heartbeat shape the local workers
+    do (SETEX worker:<name>), optionally carrying quota_remaining. A missing
+    or unparseable key means the provider is not live right now.
+    """
+    out: dict = {}
+    for name in PROVIDERS:
+        raw = r.command("GET", HEARTBEAT_PREFIX + name)
+        if not raw:
+            out[name] = None
+            continue
+        try:
+            out[name] = json.loads(raw)
+        except json.JSONDecodeError:
+            out[name] = {}
+    return out
 
 
 def load_latency(path: str) -> dict[str, float | None]:
@@ -267,10 +294,12 @@ def dispatch_one(store, r: MiniRedis, now: datetime | None = None) -> bool:
     avg_track = store.average_track_sec()
     if avg_track is None:
         avg_track = FALLBACK_AVG_TRACK_SEC
+    phealth = provider_health_from(
+        MODE, provider_heartbeats(r), CONFIGURED_PROVIDERS)
     plan = plan_assignment(
         mode=MODE,
         worker_health=health_from(states, latency),
-        provider_health=stub_provider_health(),
+        provider_health=phealth,
         queue_depth=depth,
         queue_position=int(item["queue_position"]),
         avg_track_length_sec=avg_track,
@@ -282,6 +311,7 @@ def dispatch_one(store, r: MiniRedis, now: datetime | None = None) -> bool:
     log(
         "source_chosen",
         queue_item_id=item["id"],
+        mode=MODE,
         worker=plan.worker,
         naive_worker=plan.naive_worker,
         policy=plan.policy,
@@ -325,8 +355,14 @@ def main() -> int:
     if not url or not password:
         log("manager_start_error", reason="DATABASE_URL and REDIS_PASSWORD are required")
         return 2
+    try:
+        require_paid_only_config(MODE, CONFIGURED_PROVIDERS)
+    except Exception as exc:
+        log("manager_start_error", reason=str(exc))
+        return 3
     store = connect(url)
     log("manager_start", tracks_dir=TRACKS_DIR, mode=MODE,
+        configured_providers=CONFIGURED_PROVIDERS,
         safety_margin_sec=SAFETY_MARGIN, stats_db=STATS_DB)
     redis = None
     while True:

@@ -146,6 +146,81 @@ def stub_provider_health() -> dict:
     }
 
 
+PROVIDERS = ("elevenlabs", "gemini_lyra")
+
+
+class PaidOnlyMisconfigured(Exception):
+    """GENERATION_MODE=paid_only but no provider key is configured. The
+    manager fails loudly at startup rather than discovering it per-item."""
+
+
+def configured_providers(env: dict) -> list[str]:
+    """Which paid providers have a key present. [] means a pure local clone.
+    Mirrors worker/providers.configured_providers (the two sides are
+    deliberately self-contained — different containers, no shared import)."""
+    out = []
+    if (env.get("ELEVENLABS_API_KEY") or "").strip():
+        out.append("elevenlabs")
+    if (env.get("GEMINI_API_KEY") or "").strip():
+        out.append("gemini_lyra")
+    return out
+
+
+def require_paid_only_config(mode: str, configured: list[str]) -> None:
+    """Edge case #31: paid_only with no usable key must fail loudly. Pure."""
+    if mode == "paid_only" and not configured:
+        raise PaidOnlyMisconfigured(
+            "GENERATION_MODE=paid_only but neither ELEVENLABS_API_KEY nor"
+            " GEMINI_API_KEY is set. paid_only bypasses local workers for"
+            " generation; configure a provider key or change the mode."
+        )
+
+
+def resolve_mode(env_mode: str | None, configured: list[str]) -> str:
+    """Day 14: the startup-time generation mode (design-spec Section 3.4.1).
+
+    Pure. `configured` is the list of providers whose API key is present.
+      * explicit local_only / hybrid / paid_only -> taken as-is
+      * unset/blank -> local_only if no key present, else hybrid (configuring
+        a key is consent to spend on hedging; the documented opt-out is to set
+        local_only explicitly)
+    An unrecognized value falls back to local_only (safe default).
+    """
+    mode = (env_mode or "").strip().lower()
+    if mode in ("local_only", "hybrid", "paid_only"):
+        return mode
+    if mode == "" or mode is None:
+        return "hybrid" if configured else "local_only"
+    return "local_only"
+
+
+def provider_health_from(mode: str, heartbeats: dict, configured: list[str]) -> dict:
+    """Build the provider_health dict choose_source() consumes. Pure.
+
+    A provider is "ok" only when the mode uses providers at all, its key is
+    configured, AND it has a live heartbeat (the provider-worker publishes
+    one, like the local workers). local_only never marks a provider ok, so no
+    paid call can ever happen in that mode even with keys present (the single
+    most damaging bug this day could introduce — guarded here).
+
+    `heartbeats[name]` is the parsed worker:<name> heartbeat or None.
+    quota_remaining mirrors the heartbeat's value; None means "no ceiling"
+    (Gemini Lyra), which choose_source treats as available, not unknown.
+    """
+    out: dict = {}
+    uses_providers = mode in ("hybrid", "paid_only")
+    for name in PROVIDERS:
+        hb = heartbeats.get(name)
+        live = hb is not None  # {} is a live heartbeat; None means absent
+        ok = bool(uses_providers and name in configured and live)
+        if name == "elevenlabs":
+            quota = hb.get("quota_remaining", 0) if live else 0
+        else:  # gemini_lyra: None = no hard ceiling
+            quota = hb.get("quota_remaining", None) if live else None
+        out[name] = {"ok": ok, "quota_remaining": quota}
+    return out
+
+
 @dataclass(frozen=True)
 class Assignment:
     worker: str

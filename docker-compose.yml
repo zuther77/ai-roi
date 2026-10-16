@@ -154,6 +154,28 @@ services:
       - redis
       - postgres
 
+  # Day 14 — provider-worker (Option B). Makes paid providers participate in
+  # the same pull-based Redis job protocol as the local workers. Runs on the
+  # master by default (the provider key is already here — no new secret
+  # exposure; see TRADE_OFF.md). stdlib only, so it reuses python:3.12-slim
+  # with no build. It exits cleanly (idle) when neither provider key is set,
+  # so a local_only deployment can leave it enabled harmlessly. Unlike playout
+  # it WRITES generated tracks, so the tracks mount is read-write here.
+  provider-worker:
+    image: python:3.12-slim
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      TRACKS_DIR: /srv/radio/tracks
+    volumes:
+      - ./worker:/app/worker
+      - ${TRACKS_HOST_DIR:-./tracks}:/srv/radio/tracks
+    working_dir: /app/worker
+    command: ["python", "-u", "/app/worker/provider_worker.py"]
+    restart: always
+    depends_on:
+      - redis
+
   # Day 10 — prompt form. Same image as the queue manager. Serves the page
   # and POST /prompts. Does not generate. Bind is the host interface the
   # browser uses; 0.0.0.0 is the default so a laptop on the LAN can open it.

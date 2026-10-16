@@ -348,41 +348,45 @@ concat playlist back on stdin.
 
 ---
 
-## 8. Next step: Day 14 — wire the generation modes into the Queue Manager
+## 8. Next step: Day 15 — chaos day (combined-failure testing)
 
-Day 13 is owner-verified (2026-10-07): optional paid providers,
-built IN ISOLATION (no queue/Redis/stream wiring — that is Day 14).
-`worker/providers.py` adds a `MusicProvider` ABC and two lazy, stdlib-urllib
-adapters verified against live docs via the gemini-docs MCP and the ElevenLabs
-reference:
-  * `ElevenLabsProvider` — POST /v1/music, xi-api-key, {prompt, music_length_ms,
-    model_id=music_v2_5}, MP3 bytes. Credit-based; `quota_remaining()` tracks a
-    running balance. A real-artist/song prompt returns `bad_prompt` → typed
-    `CopyrightRejected` carrying the provider's suggested alternative (the
-    provider's own copyright guard — why the Day 11 copyright LLM is a
-    local_only concern).
-  * `GeminiLyraProvider` — POST .../v1beta/models/lyria-3-clip-preview:generateContent,
-    x-goog-api-key, {contents:[{parts:[{text}]}]}, audio from
-    candidates[0].content.parts[].inlineData.data (base64 MP3, 44.1kHz stereo).
-    Pay-as-you-go; `quota_remaining()` is None unless GEMINI_LYRA_SPEND_CAP_USD
-    is set. 429/RESOURCE_EXHAUSTED → typed `QuotaExhausted`.
-Both default models are env-overridable (ELEVENLABS_MODEL / GEMINI_MODEL).
-Typed errors: `QuotaExhausted` is DISTINCT from generic `ProviderError` (Day
-14's ElevenLabs→Gemini fallback branches on it); `ProviderConfigError` for a
-missing key. `provider_quota` table + `store.log_provider_usage()` added
-(design-spec §4). `require_paid_only_config()` fails loudly at startup when
-GENERATION_MODE=paid_only with no key (edge case #31) and is a no-op in
-local_only/hybrid. Standalone owner-run scripts: `worker/try_elevenlabs.py`,
-`worker/try_gemini_lyra.py`. Unit tests: 150 repo-wide (23 new provider tests,
-mocked HTTP — no key, no network). The single most important check (app runs in
-local_only with neither key set, no provider imported/constructed) is covered by
-`configured_providers({}) == []` and the lazy-construction tests. DELL stays
-parked.
+Day 14 is implemented (owner-verification pending): all three generation modes
+wired end-to-end through the Queue Manager, via Option B (a provider-worker
+pulls provider jobs from Redis, running on the master — see TRADE_OFF.md).
 
-Owner must still run the two standalone scripts with real keys (the "playable
-audio from a real prompt" criterion makes a paid call an agent cannot run).
-`queue/timing.py`'s `stub_provider_health()` is deliberately UNTOUCHED — Day 14
-replaces it and wires `choose_source()`/hedging across all three modes.
+What changed:
+  * `queue/timing.py`: `resolve_mode()` (startup-time GENERATION_MODE auto-detect
+    per §3.4.1 — unset→local_only if no key, else hybrid; explicit values honored;
+    unknown→local_only), `configured_providers()`, `require_paid_only_config()`
+    (edge case #31 fail-loud), and `provider_health_from()` replacing the old
+    `stub_provider_health()`. local_only NEVER marks a provider ok even with keys
+    + heartbeats present — the single most damaging bug this day could introduce,
+    guarded and tested.
+  * `queue/manager.py`: resolves MODE once at startup, reads provider heartbeats
+    (`worker:elevenlabs` / `worker:gemini_lyra`), feeds real provider_health into
+    `plan_assignment`, logs `mode` per item, and fails loud at startup for
+    paid_only-with-no-keys. The existing job/hedge/cancel plumbing was already
+    keyed on an arbitrary worker string, so providers slot in with no change to
+    hedging, leases, reaper, or completion draining.
+  * `worker/provider_worker.py` (new): claims `jobs:pending:<provider>`, generates
+    via Day 13's adapters, writes atomically to the tracks dir, acks + completes,
+    heartbeats quota. QuotaExhausted → fail item + drop heartbeat (manager stops
+    routing there → ElevenLabs→Gemini→filler fallthrough). CopyrightRejected /
+    validation → ack+fail, never requeue. Idle-exits when no key is set.
+  * `docker-compose.yml`: `provider-worker` service (python:3.12-slim, master,
+    tracks mount read-WRITE, idle-safe in local_only).
+
+choose_source/pick_hedge_partner (built Day 9 with the full mode signature) now
+actually exercise their hybrid/paid_only branches. Verified by tests: local_only
+ignores healthy providers; hybrid prefers local but falls to a provider when both
+local workers are down (#33); paid_only routes ElevenLabs→Gemini→filler (#34,
+distinct from #33) and hedges ElevenLabs vs Gemini on a shallow queue; never
+touches a local worker. 171 tests repo-wide. DELL stays parked.
+
+Owner must still run the live three-mode checks with real keys (toggle
+GENERATION_MODE, confirm routing + that local_only makes zero paid calls even
+with keys present). Day 15 is the combined-failure chaos day — a testing day,
+not a building day.
 
 ---
 
