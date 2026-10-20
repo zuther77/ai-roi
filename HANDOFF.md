@@ -348,13 +348,10 @@ concat playlist back on stdin.
 
 ---
 
-## 8. Next step: Day 15 — chaos day (combined-failure testing)
+## 8. Next step: Day 16 — YouTube Live Chat as a second intake path
 
-Day 14 is owner-verified (2026-10-07): all three generation modes
-wired end-to-end through the Queue Manager, via Option B (a provider-worker
-pulls provider jobs from Redis, running on the master — see TRADE_OFF.md).
-
-What changed:
+**Day 14 (provider modes wired into the Queue Manager) — build detail, for
+reference:**
   * `queue/timing.py`: `resolve_mode()` (startup-time GENERATION_MODE auto-detect
     per §3.4.1 — unset→local_only if no key, else hybrid; explicit values honored;
     unknown→local_only), `configured_providers()`, `require_paid_only_config()`
@@ -368,7 +365,7 @@ What changed:
     paid_only-with-no-keys. The existing job/hedge/cancel plumbing was already
     keyed on an arbitrary worker string, so providers slot in with no change to
     hedging, leases, reaper, or completion draining.
-  * `worker/provider_worker.py` (new): claims `jobs:pending:<provider>`, generates
+  * `worker/provider_worker.py`: claims `jobs:pending:<provider>`, generates
     via Day 13's adapters, writes atomically to the tracks dir, acks + completes,
     heartbeats quota. QuotaExhausted → fail item + drop heartbeat (manager stops
     routing there → ElevenLabs→Gemini→filler fallthrough). CopyrightRejected /
@@ -376,17 +373,35 @@ What changed:
   * `docker-compose.yml`: `provider-worker` service (python:3.12-slim, master,
     tracks mount read-WRITE, idle-safe in local_only).
 
-choose_source/pick_hedge_partner (built Day 9 with the full mode signature) now
-actually exercise their hybrid/paid_only branches. Verified by tests: local_only
-ignores healthy providers; hybrid prefers local but falls to a provider when both
-local workers are down (#33); paid_only routes ElevenLabs→Gemini→filler (#34,
-distinct from #33) and hedges ElevenLabs vs Gemini on a shallow queue; never
-touches a local worker. 171 tests repo-wide. DELL stays parked.
+choose_source/pick_hedge_partner (built Day 9 with the full mode signature)
+exercise their hybrid/paid_only branches: local_only ignores healthy providers;
+hybrid prefers local but falls to a provider when both local workers are down
+(#33); paid_only routes ElevenLabs→Gemini→filler (#34, distinct from #33) and
+hedges ElevenLabs vs Gemini on a shallow queue; never touches a local worker.
+171 tests repo-wide at the time. DELL stays parked.
 
-Owner must still run the live three-mode checks with real keys (toggle
-GENERATION_MODE, confirm routing + that local_only makes zero paid calls even
-with keys present). Day 15 is the combined-failure chaos day — a testing day,
-not a building day.
+Day 15 is owner-verified (2026-10-20): combined-failure chaos testing across
+all three generation modes, per `DAY15_CHAOS_TESTING.md`'s checklist. All 11
+scenarios passed — total source loss per mode (edge case #2), the #33 (hybrid
+falls to a provider, not filler) vs #34 (paid_only falls to filler, never
+local) asymmetry, a queue flood during a partial worker outage, disk-near-full
+mid-write (no partial file under the final name), a brief internet outage with
+clean automatic recovery, paid_only misconfiguration failing loud, lease/race
+integrity under a kill-mid-job, and a moderation/rate-limit regression check.
+`queue/chaos_test.py` + `queue/run_chaos_tests.sh` (new) automate the
+software-state scenarios (1a/1b/1c/2a/6/7/8, plus a simulated non-real-disk
+version of 4) against the live stack; the real cable-pull, real disk-fill, and
+internet-disconnect steps stayed manual per the plan (no software mitigation
+exists for #11 by design). Sprint 5 is closed: `local_only` works standalone
+with zero external dependencies, `hybrid`/`paid_only` are available and
+genuinely optional, and graceful degradation is validated — not just designed
+— under combined real-world failure conditions. DELL stays parked.
+
+Day 16 begins Sprint 6: YouTube Live Chat as a second prompt-intake path.
+`!request <prompt>` in chat must route through the EXACT SAME
+moderation/enqueue function Day 10's `POST /prompts` already uses — no
+parallel reimplementation (the plan's explicit code-review acceptance
+criterion). A non-matching chat message is ignored, not treated as a prompt.
 
 ---
 

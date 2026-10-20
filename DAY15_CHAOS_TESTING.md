@@ -309,17 +309,22 @@ troubleshooting docs mentioned in the plan).
 
 | # | Scenario | Result | Notes / fixes needed |
 |---|---|---|---|
-| 1a | local_only, worker down, no providers | | |
-| 1b | hybrid, worker down, no providers configured | | |
-| 1c | paid_only, both providers down, local idle (#34) | | |
-| 2a | hybrid, local down, falls to provider (#33) | | |
-| 2b | cross-ref 1c | | |
-| 3 | Queue flood + partial outage | | |
-| 4 | Disk near-full mid-write | | |
-| 5 | Internet outage + recovery | | |
-| 6 | paid_only misconfig fail-loud | | |
-| 7 | Lease/race integrity under flood | | |
-| 8 | Moderation/rate-limit regression | | |
+| 1a | local_only, worker down, no providers | PASS | |
+| 1b | hybrid, worker down, no providers configured | PASS | |
+| 1c | paid_only, both providers down, local idle (#34) | PASS | |
+| 2a | hybrid, local down, falls to provider (#33) | PASS | |
+| 2b | cross-ref 1c | PASS | |
+| 3 | Queue flood + partial outage | PASS | |
+| 4 | Disk near-full mid-write | PASS | |
+| 5 | Internet outage + recovery | PASS | |
+| 6 | paid_only misconfig fail-loud | PASS | |
+| 7 | Lease/race integrity under flood | PASS | |
+| 8 | Moderation/rate-limit regression | PASS | |
+
+**Owner sign-off:** all scenarios above (automated via
+`queue/run_chaos_tests.sh` plus the manual real-disk/real-cable/internet-outage
+steps) passed, 2026-10-20. Combined-failure resilience across all three
+generation modes is confirmed, not just designed.
 
 **Overall:** everything above should result in the stream playing *something*
 (filler or normal operation), except the documented internet-outage exception
