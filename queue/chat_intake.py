@@ -89,7 +89,7 @@ def parse_published_at(value: object) -> datetime | None:
 
 def extract_messages(body: dict) -> list[dict]:
     """Normalize a liveChatMessages.list response into plain text-message
-    dicts: {id, text, channel_id, published_at}. Non-text events (superchats,
+    dicts: {id, text, channel_id, display_name, published_at}. Non-text events (superchats,
     membership events, tombstones, chatEnded) are dropped."""
     out: list[dict] = []
     for item in body.get("items") or []:
@@ -105,6 +105,7 @@ def extract_messages(body: dict) -> list[dict]:
             "id": item.get("id") or "",
             "text": text or "",
             "channel_id": channel_id,
+            "display_name": (item.get("authorDetails") or {}).get("displayName") or "",
             "published_at": parse_published_at(snippet.get("publishedAt")),
         })
     return out
@@ -133,6 +134,18 @@ def rate_key_for(channel_id: str) -> str:
     """Per-chatter rate-limit bucket. A YouTube channel id is a stronger
     identity than an IP address (and avoids the shared-NAT problem)."""
     return "yt:" + (channel_id or "unknown")
+
+
+_NAME_JUNK = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def mention(display_name: object) -> str:
+    """'@name ' prefix so a reply in a busy chat says who it is for. Control
+    characters are stripped and the name is capped; empty -> no prefix."""
+    if not isinstance(display_name, str):
+        return ""
+    name = _NAME_JUNK.sub("", display_name).strip().lstrip("@")[:30]
+    return f"@{name} " if name else ""
 
 
 def reply_for(result: submit.SubmitResult) -> str | None:
@@ -326,7 +339,8 @@ class ChatBot:
         reply = reply_for(result)
         if reply and self.replier and self.chat_id:
             if self.reply_budget is None or self.reply_budget.try_spend():
-                self.replier.send(self.chat_id, reply)
+                self.replier.send(
+                    self.chat_id, mention(message.get("display_name")) + reply)
             else:
                 log("chat_reply_skipped", reason="hourly_budget")
 

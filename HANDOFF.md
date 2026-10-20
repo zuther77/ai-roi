@@ -416,9 +416,14 @@ Day 10 web form stays as an operator tool published on localhost only
     cannot lower. Reading chat needs only an API key; REPLIES need OAuth and cost
     20 units, so they are optional (off unless all three OAuth values are set),
     capped per hour, and never sent to rate-limited chatters.
+  * Optional chat replies ("@name Queued at position N." / the rejection reason)
+    are addressed to the chatter so they are readable in a busy chat. Enable with
+    the three YOUTUBE_OAUTH_* values; `queue/youtube_oauth_setup.py` (OAuth device
+    flow, run once) prints them. Note: a consent screen left in "Testing" expires
+    the refresh token after 7 days.
   * The first poll's chat history is discarded so a restart never re-submits old
     requests (cost: requests typed while the bot is down are not replayed).
-  * 211 tests repo-wide. DELL stays parked.
+  * 219 tests repo-wide. DELL stays parked.
 
 Owner must run the live check against a real stream (see the Day 16
 verification steps): `!request` in chat is moderated and aired; a non-command

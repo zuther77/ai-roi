@@ -39,7 +39,7 @@ class StubLimiter:
         return RateDecision(False, self.retry_after)
 
 
-def msg(text, channel="UCabc", mid="m1", at=None, type_="textMessageEvent"):
+def msg(text, channel="UCabc", mid="m1", at=None, type_="textMessageEvent", name="Alex"):
     return {
         "id": mid,
         "snippet": {
@@ -47,7 +47,7 @@ def msg(text, channel="UCabc", mid="m1", at=None, type_="textMessageEvent"):
             "publishedAt": (at or T0 + timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
             "textMessageDetails": {"messageText": text},
         },
-        "authorDetails": {"channelId": channel},
+        "authorDetails": {"channelId": channel, "displayName": name},
     }
 
 
@@ -62,6 +62,21 @@ class FakeReplier:
     def send(self, chat_id, text):
         self.sent.append((chat_id, text))
         return True
+
+
+class MentionTest(unittest.TestCase):
+    def test_prefixes_at_name(self):
+        self.assertEqual(ci.mention("Alex"), "@Alex ")
+
+    def test_strips_leading_at_control_chars_and_caps_length(self):
+        self.assertEqual(ci.mention("@Alex"), "@Alex ")
+        self.assertEqual(ci.mention("Al\x00ex\n"), "@Alex ")
+        self.assertEqual(len(ci.mention("x" * 100)), len("@ ") + 30)
+
+    def test_missing_name_means_no_prefix(self):
+        for value in ("", "   ", None, 5):
+            with self.subTest(value=value):
+                self.assertEqual(ci.mention(value), "")
 
 
 class ParseCommandTest(unittest.TestCase):
@@ -203,6 +218,17 @@ class BotTest(unittest.TestCase):
         bot = self.make_bot([page([]), page([stale])])
         bot.poll_once(); bot.poll_once()
         self.assertEqual(self.store.open_depth(), 0)
+
+    def test_replies_are_addressed_to_the_chatter(self):
+        rep = FakeReplier()
+        bot = self.make_bot([page([]), page([msg("!request calm piano", mid="n1", name="Sam")])],
+                            replier=rep)
+        bot.poll_once(); bot.poll_once()
+        self.assertEqual(rep.sent, [("chat1", "@Sam Queued at position 1.")])
+
+    def test_display_name_is_captured_from_author_details(self):
+        out = ci.extract_messages(page([msg("!request a", name="Jo")]))
+        self.assertEqual(out[0]["display_name"], "Jo")
 
     def test_moderation_rejection_does_not_enqueue_and_replies(self):
         rep = FakeReplier()
@@ -361,6 +387,28 @@ class RunLoopTest(unittest.TestCase):
         bot.run_forever()
         self.assertEqual(bot.chat_id, "NEW")        # re-resolved after liveChatEnded
         self.assertGreater(sleeps[0], 60.0)         # backed off, did not hammer the API
+
+
+class OAuthSetupTest(unittest.TestCase):
+    def test_polling_states(self):
+        import youtube_oauth_setup as s
+        self.assertEqual(s.interpret_token_response(200, {"refresh_token": "RT"}), ("done", "RT"))
+        self.assertEqual(s.interpret_token_response(428, {"error": "authorization_pending"})[0], "wait")
+        self.assertEqual(s.interpret_token_response(403, {"error": "slow_down"})[0], "slow")
+        self.assertEqual(s.interpret_token_response(403, {"error": "access_denied"})[0], "fail")
+        self.assertEqual(s.interpret_token_response(400, {"error": "expired_token"})[0], "fail")
+
+    def test_success_without_refresh_token_is_a_clear_failure(self):
+        import youtube_oauth_setup as s
+        state, reason = s.interpret_token_response(200, {"access_token": "AT"})
+        self.assertEqual(state, "fail")
+        self.assertIn("refresh_token", reason)
+
+    def test_env_lines_match_the_names_the_bot_reads(self):
+        import youtube_oauth_setup as s
+        lines = s.env_lines("cid", "sec", "rt")
+        env = dict(l.split("=", 1) for l in lines.strip().splitlines())
+        self.assertIsNotNone(ci.build_replier(env))
 
 
 if __name__ == "__main__":

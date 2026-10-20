@@ -289,11 +289,16 @@ Ordered roughly by the day/area they were decided.
 ### Chat replies are optional, OAuth-gated, budget-capped, and skipped for rate-limited users
 - **Chosen:** the bot only replies when `YOUTUBE_OAUTH_CLIENT_ID/SECRET/
   REFRESH_TOKEN` are all set, at most `CHAT_REPLY_BUDGET_PER_HOUR` (default 60)
-  per hour, and never to a rate-limited chatter.
+  per hour, and never to a rate-limited chatter. Replies are prefixed with
+  `@<display name>` so they are readable in a busy chat. `queue/
+  youtube_oauth_setup.py` obtains the refresh token once (OAuth device flow).
 - **Given up:** guaranteed feedback in chat. With replies off, a viewer whose
   request is rejected or rate-limited sees nothing happen. That is the same
   "silent rejection" the design spec calls bad UX, accepted here because the
   alternative needs an OAuth consent flow most deployers won't want.
+- **Also given up:** replies post AS the authorized account, and a consent
+  screen left in Google's "Testing" state expires the refresh token after 7
+  days (publish it for a durable token). The token must be re-issued if revoked.
 - **Why:** an API key cannot post to chat; posting needs OAuth and each reply
   costs 20 units. Replying to rate-limited users would let one spammer drain the
   quota through the bot. Rejections are always logged (`prompt_rejected`).
