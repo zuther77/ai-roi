@@ -247,3 +247,66 @@ Ordered roughly by the day/area they were decided.
   call model (closer to Option A). The spec's *intent* (race two sources, take the
   winner, cancel the loser) is preserved exactly; only the execution mechanism
   differs, consistent with how local workers already run.
+
+---
+
+## Prompt intake (Day 16)
+
+### YouTube chat is the public path; the web form is a localhost-only operator tool
+- **Chosen:** viewers submit via `!request <prompt>` in YouTube Live Chat. The
+  Day 10 form stays, published on `127.0.0.1` only (`INTAKE_BIND`).
+- **Given up:** a public web form anyone can open in a browser, and the
+  design-spec v0.4 ordering (form primary, chat alternative).
+- **Why:** one front door viewers already have open, a smaller attack surface
+  (the form was bound to `0.0.0.0:8080`), and rate limiting keyed on a YouTube
+  channel id instead of an IP. The form is kept (not deleted) because it is the
+  only way to test the pipeline without a live stream, and the chaos tests use
+  it. **Owner decision 2026-10-20** (option 2 of 3; form localhost-only).
+- **Cost:** intake now depends on YouTube. If the chat API is down, quota is
+  exhausted, or chat is disabled, viewers cannot request songs — the stream and
+  filler are unaffected, and the operator form still works.
+
+### Both intake paths share one function (`queue/submit.py`)
+- **Chosen:** rate-limit → sanitize → moderate → enqueue lives only in
+  `submit_prompt()`; the form and the bot translate its result into their own
+  reply. Enforced by tests that fail if either module grows its own moderation,
+  rate-limit, or enqueue calls.
+- **Given up:** the freedom to tweak one path's behavior without touching the
+  other. That is the point: a moderation fix lands in one place.
+
+### Chat polling uses an enforced 60s floor (not the server's suggested interval)
+- **Chosen:** `CHAT_MIN_POLL_SEC` (default 60) can only slow polling; the
+  server's `pollingIntervalMillis` never lowers it.
+- **Given up:** request latency. A song request is noticed up to ~60s after it
+  is typed.
+- **Why:** each `liveChatMessages.list` call costs 5 quota units against a
+  default 10,000/day. Polling every ~5s would exhaust the day's quota in about
+  3 hours and break intake (and anything else using the key) until it resets.
+  60s ≈ 7,200 units/day. Generation takes ~95s anyway, so the delay is not
+  noticeable. Raise your quota to poll faster. (`streamList` is also 5 units per
+  call and needs a gRPC streaming client, so it is not a cheaper shortcut here.)
+
+### Chat replies are optional, OAuth-gated, budget-capped, and skipped for rate-limited users
+- **Chosen:** the bot only replies when `YOUTUBE_OAUTH_CLIENT_ID/SECRET/
+  REFRESH_TOKEN` are all set, at most `CHAT_REPLY_BUDGET_PER_HOUR` (default 60)
+  per hour, and never to a rate-limited chatter.
+- **Given up:** guaranteed feedback in chat. With replies off, a viewer whose
+  request is rejected or rate-limited sees nothing happen. That is the same
+  "silent rejection" the design spec calls bad UX, accepted here because the
+  alternative needs an OAuth consent flow most deployers won't want.
+- **Why:** an API key cannot post to chat; posting needs OAuth and each reply
+  costs 20 units. Replying to rate-limited users would let one spammer drain the
+  quota through the bot. Rejections are always logged (`prompt_rejected`).
+
+### Chat history is skipped on startup; requests typed during downtime are lost
+- **Chosen:** the first `list` page (recent history) is discarded and only
+  messages published after the process started are handled.
+- **Given up:** replaying requests typed while the bot was down or restarting.
+- **Why:** without this, every restart would re-submit every recent
+  `!request` in the history, duplicating songs and burning moderation calls.
+
+### Operator-form default bind changed from 0.0.0.0 to 127.0.0.1
+- **Chosen:** `INTAKE_BIND` defaults to `127.0.0.1`.
+- **Given up:** opening the form from a laptop on the LAN without configuration.
+- **Why/how to undo:** owner decision. To reach it from another machine set
+  `INTAKE_BIND=192.168.1.210` in `.env`.

@@ -1,15 +1,14 @@
-"""Day 10 prompt form + Day 11 moderation + Day 12 rate limiting.
+"""Operator prompt form (Day 10) - a thin HTTP adapter over submit.py.
 
-POST /prompts: rate-limit the source, sanitize + validate, moderate, enqueue.
-It does not generate audio and does not wait for a worker. The queue manager
-assigns the row later. The page is served by this same process, so the browser
-and the endpoint share one origin.
+POST /prompts hands the text to submit_prompt() (rate-limit, sanitize,
+moderate, enqueue - all in submit.py, shared with the YouTube chat bot) and
+translates the SubmitResult into an HTTP status + JSON body. No intake logic
+lives here.
 
-Day 11: every prompt is moderated BEFORE enqueue (design-spec Section 3.2); the
-harmful-content check requires OPENAI_API_KEY, so intake fails closed at startup
-without it. Day 12: one prompt per source per cooldown window (Redis TTL), HTTP
-429 on excess, control-character sanitization. The rate limiter fails OPEN if
-Redis is down (abuse mitigation, not a safety gate — unlike moderation).
+Day 16: the PUBLIC intake path is YouTube Live Chat (chat_intake.py). This
+form is an operator/testing tool: Compose publishes it on localhost only
+(INTAKE_BIND, default 127.0.0.1). It still moderates and rate-limits exactly
+like chat because it calls the same function.
 
 The 1000-character cap matches worker/base.py MAX_PROMPT_CHARS. A prompt the
 form accepts is a prompt the worker will accept.
@@ -19,25 +18,16 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from moderation import (
-    ModerationConfigError,
-    ModerationUnavailable,
-    moderate_prompt,
-    require_moderation_config,
-)
-from ratelimit import (
-    DEFAULT_COOLDOWN_SEC,
-    MiniRedis,
-    check_rate,
-    client_source,
-    retry_after_message,
-)
+import submit
+from moderation import ModerationConfigError, require_moderation_config
+from ratelimit import DEFAULT_COOLDOWN_SEC, client_source
 from store import QueueStore, connect
+# Re-exported: tests and other modules import these names from here.
+from submit import RateLimiter, log as _log, prompt_error, sanitize_prompt  # noqa: F401
 
-MAX_PROMPT_CHARS = 1000
+MAX_PROMPT_CHARS = submit.MAX_PROMPT_CHARS
 MAX_BODY_BYTES = 16 * 1024
 SOURCE = "web"
 
@@ -110,129 +100,36 @@ PAGE = """<!DOCTYPE html>
 </html>
 """
 
-
-import re
-
-# Control chars except common whitespace (tab/newline we also strip here since
-# a prompt is a single line of description). Day 12 input sanitization.
-_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
-
-
-def sanitize_prompt(text: object) -> str | None:
-    """Normalize submitted text. None when it is not usable text at all.
-
-    Strips control characters and collapses surrounding whitespace. Returns
-    the cleaned string (possibly empty — the caller treats empty as invalid).
-    """
-    if not isinstance(text, str):
-        return None
-    return _CONTROL_CHARS.sub("", text).strip()
-
-
-def prompt_error(text: object) -> str | None:
-    """None when the text can be enqueued. Otherwise a message for the form.
-
-    Day 12: control characters are stripped before the checks, so a prompt
-    made only of control characters reads as empty and is rejected.
-    """
-    cleaned = sanitize_prompt(text)
-    if cleaned is None:
-        return "Prompt must be text."
-    if not cleaned:
-        return "Prompt is empty."
-    if len(cleaned) > MAX_PROMPT_CHARS:
-        return "Prompt is longer than 1000 characters."
-    return None
-
-
-def _log(event: str, **fields) -> None:
-    entry = {"ts": datetime.now(timezone.utc).isoformat(), "event": event}
-    entry.update(fields)
-    print(json.dumps(entry, default=str), flush=True)
-
-
-class RateLimiter:
-    """Lazy, reconnecting, fail-open Redis rate limiter.
-
-    A None url (no Redis configured) or any connection failure means
-    "allow": the limiter never blocks prompt intake just because Redis is
-    unavailable. Day 12 scope.
-    """
-
-    def __init__(self, url: str | None, password: str, cooldown_sec: int):
-        self._url = url
-        self._password = password
-        self.cooldown_sec = cooldown_sec
-        self._redis: MiniRedis | None = None
-
-    def allow(self, source: str):
-        """Return a RateDecision. Fails open to allowed on any Redis trouble."""
-        if not self._url:
-            return _ALLOW
-        try:
-            if self._redis is None:
-                self._redis = MiniRedis(self._url, self._password)
-            return check_rate(self._redis, source, self.cooldown_sec)
-        except Exception as exc:
-            _log("ratelimit_unavailable", error=str(exc)[:200])
-            self._redis = None
-            return _ALLOW
-
-
-class _Allow:
-    allowed = True
-    retry_after_sec = 0
-
-
-_ALLOW = _Allow()
+# HTTP status for each submit outcome. The only place the form's reply format
+# is decided; the decisions themselves are made in submit.py.
+_STATUS = {
+    submit.QUEUED: 200,
+    submit.INVALID: 400,
+    submit.REJECTED: 400,
+    submit.RATE_LIMITED: 429,
+    submit.UNAVAILABLE: 503,
+}
 
 
 def accept_prompt(store: QueueStore, text: object, *, env: dict | None = None,
                   post=None, limiter: RateLimiter | None = None,
                   source: str = "ip:unknown") -> tuple[int, dict]:
-    """Rate-limit, sanitize, moderate, then insert one queue item.
-
-    Returns an HTTP status + JSON body. Does not call a worker. On approval
-    the row stays queued until the queue manager assigns it. On rejection
-    (rate, validation, or moderation) nothing is enqueued.
-    """
-    # 1. Rate limit first — cheapest, and it must gate the moderation API
-    #    call so a spammer cannot burn moderation quota.
-    if limiter is not None:
-        decision = limiter.allow(source)
-        if not decision.allowed:
-            msg = retry_after_message(decision.retry_after_sec)
-            _log("prompt_rate_limited", source=source,
-                 retry_after_sec=decision.retry_after_sec)
-            return 429, {"error": msg, "retry_after_sec": decision.retry_after_sec}
-
-    # 2. Sanitize + validate.
-    error = prompt_error(text)
-    if error:
-        return 400, {"error": error}
-    cleaned = sanitize_prompt(text) or ""
-
-    # 3. Moderate.
-    try:
-        verdict = moderate_prompt(cleaned, env=env, post=post)
-    except ModerationUnavailable as exc:
-        # Fail closed: the required backend is down, so we refuse rather than
-        # enqueue un-screened text. 503 tells the user to try again.
-        _log("moderation_unavailable", error=str(exc)[:300])
-        return 503, {"error": "Moderation is temporarily unavailable. Please try again."}
-
-    if not verdict.allowed:
-        prompt_id = store.record_rejected_prompt(cleaned, source=SOURCE)
-        _log("prompt_rejected", prompt_id=prompt_id, category=verdict.category,
-             reason=verdict.reason, prompt=cleaned[:200])
-        return 400, {"error": verdict.reason}
-
-    item = store.enqueue(cleaned, source=SOURCE)
-    return 200, {
-        "id": item["id"],
-        "queue_position": item["queue_position"],
-        "status": item["status"],
-    }
+    """Run the shared pipeline and return an HTTP status + JSON body."""
+    result = submit.submit_prompt(
+        store, text, source=SOURCE, rate_key=source,
+        limiter=limiter, env=env, post=post,
+    )
+    status = _STATUS[result.outcome]
+    if result.outcome == submit.QUEUED:
+        return status, {
+            "id": result.item_id,
+            "queue_position": result.queue_position,
+            "status": result.status,
+        }
+    body = {"error": result.message}
+    if result.outcome == submit.RATE_LIMITED:
+        body["retry_after_sec"] = result.retry_after_sec
+    return status, body
 
 
 def make_handler(store: QueueStore, *, env: dict | None = None, post=None,

@@ -10,10 +10,14 @@ test
   into `local_only` and plays the filler pool forever — the stream-never-stops
   guarantee holds with no keys of any kind.
 - **Prompt intake needs one key.** As of Day 11, submitting prompts
-  (`POST /prompts`, the web form) requires a text-moderation key,
-  `OPENAI_API_KEY`. The `intake` service fails closed at startup without it, so
-  user text is never un-screened. This gates only intake — playout, Redis,
-  Postgres, and the queue manager all come up and stream regardless.
+  requires a text-moderation key, `OPENAI_API_KEY`. The intake services fail
+  closed at startup without it, so user text is never un-screened. This gates
+  only intake — playout, Redis, Postgres, and the queue manager all come up and
+  stream regardless.
+- **Viewers request songs through YouTube chat** (`!request <prompt>`, Day 16);
+  see `.env.example` for `YOUTUBE_DATA_API_KEY` / `YOUTUBE_VIDEO_ID` and the
+  chat quota notes. The web form is an operator tool published on localhost
+  only.
 - **Generation is still zero-cost by default.** The moderation key screens
   text; it does not generate audio and is not billed per track. Paid generation
   providers (`hybrid`/`paid_only`) remain fully optional.

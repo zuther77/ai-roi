@@ -397,11 +397,33 @@ with zero external dependencies, `hybrid`/`paid_only` are available and
 genuinely optional, and graceful degradation is validated — not just designed
 — under combined real-world failure conditions. DELL stays parked.
 
-Day 16 begins Sprint 6: YouTube Live Chat as a second prompt-intake path.
-`!request <prompt>` in chat must route through the EXACT SAME
-moderation/enqueue function Day 10's `POST /prompts` already uses — no
-parallel reimplementation (the plan's explicit code-review acceptance
-criterion). A non-matching chat message is ignored, not treated as a prompt.
+Day 16 is implemented (owner-verification pending): YouTube Live Chat as the
+PUBLIC prompt path. Owner decision 2026-10-20 (option 2): chat is public, the
+Day 10 web form stays as an operator tool published on localhost only
+(`INTAKE_BIND`, default 127.0.0.1; design-spec §3.1 and TRADE_OFF.md updated).
+  * `queue/submit.py` (new): `submit_prompt()` is the ONE intake pipeline —
+    rate-limit → sanitize → moderate → enqueue — extracted from `intake.py`.
+    `intake.py` is now a thin HTTP adapter (all 113 pre-existing queue tests
+    passed unchanged). Tests fail if either path grows its own moderation,
+    rate-limit, or enqueue calls (the plan's code-review criterion).
+  * `queue/chat_intake.py` (new, `chat-intake` Compose service): polls
+    `liveChatMessages.list`, parses `!request <prompt>`, ignores everything else,
+    calls `submit_prompt(source="youtube_chat", rate_key="yt:<channelId>")`.
+    Idles (no crash-loop) when YouTube isn't configured; exits 3 without
+    OPENAI_API_KEY like the form.
+  * Quota-driven design (YouTube docs): a poll costs 5 units of a 10,000/day
+    default, so `CHAT_MIN_POLL_SEC` (60s ≈ 7,200 units/day) is a floor the server
+    cannot lower. Reading chat needs only an API key; REPLIES need OAuth and cost
+    20 units, so they are optional (off unless all three OAuth values are set),
+    capped per hour, and never sent to rate-limited chatters.
+  * The first poll's chat history is discarded so a restart never re-submits old
+    requests (cost: requests typed while the bot is down are not replayed).
+  * 211 tests repo-wide. DELL stays parked.
+
+Owner must run the live check against a real stream (see the Day 16
+verification steps): `!request` in chat is moderated and aired; a non-command
+message is ignored; a rejected request is logged; the form is unreachable from
+another machine. An agent cannot do this — it needs a live broadcast + API key.
 
 ---
 

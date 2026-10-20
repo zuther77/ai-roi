@@ -176,9 +176,32 @@ services:
     depends_on:
       - redis
 
-  # Day 10 — prompt form. Same image as the queue manager. Serves the page
-  # and POST /prompts. Does not generate. Bind is the host interface the
-  # browser uses; 0.0.0.0 is the default so a laptop on the LAN can open it.
+  # Day 16 — YouTube Live Chat intake: the PUBLIC prompt path. Viewers type
+  # `!request <prompt>` in the stream's chat; this polls the chat and calls the
+  # same submit_prompt() the operator form uses. Publishes no port. With
+  # YOUTUBE_DATA_API_KEY / YOUTUBE_VIDEO_ID unset it idles (no crash-loop), so
+  # a deployment without YouTube chat is unaffected. Needs OPENAI_API_KEY like
+  # the form (never accepts un-screened text).
+  chat-intake:
+    build: ./queue
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-radio}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-radio}
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./queue:/app/queue:ro
+    command: ["python", "-u", "/app/queue/chat_intake.py"]
+    restart: always
+    depends_on:
+      - postgres
+      - redis
+
+  # Day 10 — operator prompt form. Same image as the queue manager. Serves the
+  # page and POST /prompts. Does not generate.
+  # Day 16: this is an operator/testing tool, NOT the public path (that is
+  # chat-intake above). Published on LOCALHOST ONLY by default (owner decision
+  # 2026-10-20). To reach it from another machine on purpose, set
+  # INTAKE_BIND=<master LAN address> in .env.
   intake:
     build: ./queue
     env_file: .env
@@ -189,7 +212,7 @@ services:
       # REDIS_PASSWORD comes from .env via env_file).
       REDIS_URL: redis://redis:6379/0
     ports:
-      - "${INTAKE_BIND:-0.0.0.0}:8080:8080"
+      - "${INTAKE_BIND:-127.0.0.1}:8080:8080"
     volumes:
       - ./queue:/app/queue:ro
     command: ["python", "-u", "/app/queue/intake.py"]
