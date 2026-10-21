@@ -231,6 +231,7 @@ from timing import (  # noqa: E402
     DEFAULT_LOCAL_MIN_DURATION_SEC,
     effective_duration_sec,
     parse_local_min_duration,
+    parse_provider_duration,
 )
 
 
@@ -267,10 +268,19 @@ class EffectiveDurationTest(unittest.TestCase):
         self.assertEqual(effective_duration_sec("macbook_air", 30, 89.2), 90)
         self.assertEqual(effective_duration_sec("macbook_air", 90.4, 90), 91)
 
-    def test_paid_providers_keep_the_items_own_length(self):
+    def test_paid_providers_get_their_own_floor_not_the_local_one(self):
         for provider in ("elevenlabs", "gemini_lyra"):
             with self.subTest(provider=provider):
-                self.assertEqual(effective_duration_sec(provider, 30, 90), 30)
+                self.assertEqual(effective_duration_sec(provider, 30, 90, 180), 180)
+                # a local floor must not leak into provider jobs
+                self.assertEqual(effective_duration_sec(provider, 30, 600, 180), 180)
+
+    def test_a_longer_provider_request_is_kept(self):
+        self.assertEqual(effective_duration_sec("elevenlabs", 240, 90, 180), 240)
+
+    def test_provider_default_is_three_minutes(self):
+        self.assertEqual(parse_provider_duration(None), 180.0)
+        self.assertEqual(effective_duration_sec("elevenlabs", 30, 90), 180)
 
 
 class ManagerJobPayloadTest(unittest.TestCase):
@@ -291,9 +301,15 @@ class ManagerJobPayloadTest(unittest.TestCase):
     def test_hedge_backup_to_a_local_worker_also_gets_the_floor(self):
         self.assertGreaterEqual(self._payload("macbook_air", hedge=True)["target_duration_sec"], 90)
 
-    def test_job_for_a_paid_provider_is_unchanged(self):
-        self.assertEqual(self._payload("elevenlabs")["target_duration_sec"], 30)
-        self.assertEqual(self._payload("gemini_lyra")["target_duration_sec"], 30)
+    def test_job_for_a_paid_provider_is_3_minutes(self):
+        self.assertEqual(self._payload("elevenlabs")["target_duration_sec"], 180)
+        self.assertEqual(self._payload("gemini_lyra")["target_duration_sec"], 180)
+
+    def test_bad_provider_duration_is_rejected(self):
+        for bad in ("abc", "4", "301", "-5"):
+            with self.subTest(value=bad):
+                with self.assertRaises(ValueError):
+                    parse_provider_duration(bad)
 
     def test_a_raised_floor_is_honored(self):
         import manager

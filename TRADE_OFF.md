@@ -387,3 +387,51 @@ Ordered roughly by the day/area they were decided.
   and the setting lives in the master's `.env`, not on each worker machine. A
   bad value (outside 5-300s, the worker's own validation range) stops the manager
   at startup instead of making every local job fail.
+
+---
+
+## Hybrid routing: overflow to a provider when local is busy
+
+### A busy local worker no longer holds items; an available provider takes them
+- **Chosen (owner decision 2026-10-21):** in `hybrid`, the router tries local
+  first. If every healthy local worker is busy and a provider is available
+  (ElevenLabs with a known balance > 0, else Gemini), the item goes to the
+  provider immediately. Only when no provider is available does it queue behind
+  the busy local worker. Filler therefore only plays when nothing new is ready.
+- **Why:** observed in a live log - a 150s Mac generation takes ~3m40s, and items
+  2 and 3 queued behind it (hedges scheduled 480s and 630s out) while ElevenLabs
+  sat idle and filler played.
+- **Given up:**
+  1. **Money.** Every item that arrives while the Mac is occupied is now a paid
+     generation. With ~3m40s per local track and a 3-minute provider track
+     (~2,700 credits), a steady stream spends credits continuously. The balance
+     check (known and > 0) is the only brake; there is no per-hour or per-day
+     spend cap. `local_only` spends nothing.
+  2. **Spec fidelity.** Design-spec 5.3/5.4 make a paid provider a hedge partner
+     for at-risk items only. This extends it to overflow. The spec was updated.
+  3. **Uniform sound.** More tracks now come from ElevenLabs than before, so the
+     station's mix shifts toward it whenever load is above one local job.
+- **Related fix (same change):** "busy" used to come only from the worker's own
+  heartbeat, which updates every 5s, so an item dispatched a second after another
+  still saw an idle Mac and queued behind it. Busy now also counts jobs already
+  pushed to or running on that worker (`jobs:pending:<w>` + `jobs:in_progress`).
+
+### Paid-provider tracks are 3 minutes (`PROVIDER_DURATION_SEC`, default 180)
+- **Chosen:** the manager asks providers for at least 180s (owner request); local
+  workers keep their own floor (`LOCAL_MIN_DURATION_SEC`).
+- **Given up:** (1) **cost** - roughly 1.5x the credits of the 2-minute figure the
+  spec quotes; (2) **Gemini is unaffected** - the clip model is fixed at 30s and
+  has no duration parameter, so a Gemini track stays 30s even though the job says
+  180 (switching to `lyria-3.5` would need the length written into the prompt
+  text, which I did not do); (3) **latency** - a longer ElevenLabs track takes
+  longer than the ~6-8s a 30s one did (unmeasured).
+
+### Known and deliberately NOT changed: hedge timers use the all-time item number
+- `time_budget_sec` is `queue_position x avg_track_sec`, but `queue_position` is a
+  sequence number that only ever grows (item #7 ever = position 7), not the item's
+  place among open items. In the logs the budget went 150, 300, 450, 600, 750
+  while depth stayed at 2-3, which pushes hedge start times to 330-630s.
+- Fixing it would make the "shallow queue" hedge fire after ~30s on nearly every
+  item, i.e. a paid ElevenLabs generation running in parallel with almost every
+  local one. That is a cost decision, not a bug fix, so it is left alone until
+  the owner chooses.

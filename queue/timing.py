@@ -32,6 +32,11 @@ FALLBACK_AVG_TRACK_SEC = 30.0
 # a local worker; paid providers keep the item's own length (a paid track costs
 # per second, and the Gemini clip model is fixed at 30s). Env: LOCAL_MIN_DURATION_SEC.
 DEFAULT_LOCAL_MIN_DURATION_SEC = 90.0
+# Owner request: paid-provider tracks are 3 minutes. Applied to ElevenLabs (it
+# takes an explicit length). The Gemini clip model is fixed at 30s and its
+# request has no duration field, so this cannot lengthen Gemini tracks.
+# Env: PROVIDER_DURATION_SEC.
+DEFAULT_PROVIDER_DURATION_SEC = 180.0
 # Bounds mirror worker/base.py MIN/MAX_DURATION_SEC: a floor outside them would
 # make every local job fail validation, so a bad value is rejected at startup.
 MIN_ALLOWED_DURATION_SEC = 5.0
@@ -43,34 +48,42 @@ MIN_HEALTHY_DEPTH = 5
 LOCAL_WORKERS = CANONICAL
 
 
-def parse_local_min_duration(raw: str | None) -> float:
-    """LOCAL_MIN_DURATION_SEC -> seconds. Blank/unset -> the default. Raises
-    ValueError for non-numeric or out-of-range values (fail loud at startup
-    rather than failing every local job later). Pure."""
+def _parse_duration(name: str, raw: str | None, default: float) -> float:
+    """Shared parser for the *_DURATION_SEC settings. Blank/unset -> default.
+    Raises ValueError for non-numeric or out-of-range values (fail loud at
+    startup rather than failing every job later). Pure."""
     text = (raw or "").strip()
     if not text:
-        return DEFAULT_LOCAL_MIN_DURATION_SEC
+        return default
     try:
         value = float(text)
     except ValueError:
-        raise ValueError(f"LOCAL_MIN_DURATION_SEC={raw!r} is not a number") from None
+        raise ValueError(f"{name}={raw!r} is not a number") from None
     if not (MIN_ALLOWED_DURATION_SEC <= value <= MAX_ALLOWED_DURATION_SEC):
         raise ValueError(
-            f"LOCAL_MIN_DURATION_SEC={value:g} is outside the allowed range "
+            f"{name}={value:g} is outside the allowed range "
             f"[{MIN_ALLOWED_DURATION_SEC:g}, {MAX_ALLOWED_DURATION_SEC:g}] seconds")
     return value
 
 
-def effective_duration_sec(worker: str, requested: float, local_min: float) -> int:
+def parse_local_min_duration(raw: str | None) -> float:
+    return _parse_duration("LOCAL_MIN_DURATION_SEC", raw, DEFAULT_LOCAL_MIN_DURATION_SEC)
+
+
+def parse_provider_duration(raw: str | None) -> float:
+    return _parse_duration("PROVIDER_DURATION_SEC", raw, DEFAULT_PROVIDER_DURATION_SEC)
+
+
+def effective_duration_sec(worker: str, requested: float, local_min: float,
+                           provider_min: float = DEFAULT_PROVIDER_DURATION_SEC) -> int:
     """Seconds of music to request from `worker`. Pure.
 
-    Local workers get at least `local_min` (rounded up); a longer request is
-    kept. Paid providers get exactly what the item asked for.
+    Local workers get at least `local_min`, paid providers at least
+    `provider_min` (both rounded up); a longer request is always kept.
     """
     asked = int(math.ceil(float(requested)))
-    if worker in LOCAL_WORKERS:
-        return max(asked, int(math.ceil(local_min)))
-    return asked
+    floor = local_min if worker in LOCAL_WORKERS else provider_min
+    return max(asked, int(math.ceil(floor)))
 
 
 def rolling_average(samples: list[float], window: int = ROLLING_WINDOW) -> float | None:
@@ -122,6 +135,22 @@ def _latency(worker_health: dict, name: str) -> float:
     return float(raw)
 
 
+def pick_available_provider(provider_health: dict) -> str | None:
+    """A provider that can take work right now, else None. Pure.
+
+    ElevenLabs needs a live heartbeat AND a known balance > 0 (an unknown
+    balance counts as exhausted - design-spec 5.3, the same rule paid_only and
+    the hedge partner use). Gemini needs only a live heartbeat: no balance
+    ceiling to check.
+    """
+    el = provider_health["elevenlabs"]
+    if el["ok"] and (el["quota_remaining"] or 0) > 0:
+        return "elevenlabs"
+    if provider_health["gemini_lyra"]["ok"]:
+        return "gemini_lyra"
+    return None
+
+
 def choose_source(mode: str, worker_health: dict, provider_health: dict) -> str:
     """Section 5.3. Paid providers are a stub until Sprint 5: not ok."""
     if mode == "paid_only":
@@ -143,6 +172,15 @@ def choose_source(mode: str, worker_health: dict, provider_health: dict) -> str:
     idle = [w for w in candidates if not worker_health[w]["busy"]]
     if idle:
         return min(idle, key=lambda w: (_latency(worker_health, w), LOCAL_WORKERS.index(w)))
+    # Every healthy local worker is busy. In hybrid, a provider that is
+    # available takes the item NOW instead of it queueing behind a generation
+    # that takes minutes while filler plays (owner decision 2026-10-21; this
+    # extends design-spec 5.3, where paid was only a hedge partner). Only when
+    # no provider can take it does it wait on the busy local worker.
+    if mode == "hybrid":
+        provider = pick_available_provider(provider_health)
+        if provider is not None:
+            return provider
     return min(
         candidates,
         key=lambda w: (

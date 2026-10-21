@@ -30,9 +30,11 @@ from timing import (
     ROLLING_WINDOW,
     SAFETY_MARGIN_SEC,
     DEFAULT_LOCAL_MIN_DURATION_SEC,
+    DEFAULT_PROVIDER_DURATION_SEC,
     configured_providers,
     effective_duration_sec,
     parse_local_min_duration,
+    parse_provider_duration,
     plan_assignment,
     provider_health_from,
     require_paid_only_config,
@@ -57,6 +59,9 @@ SAFETY_MARGIN = float(os.environ.get("SAFETY_MARGIN_SEC", str(SAFETY_MARGIN_SEC)
 # main(): a bad value stops the manager with a clear error instead of making
 # every local job fail validation at the worker.
 LOCAL_MIN_DURATION_SEC = DEFAULT_LOCAL_MIN_DURATION_SEC
+# Length of paid-provider tracks (owner request: 3 minutes). Same startup
+# validation. Applies to ElevenLabs; the Gemini clip model is fixed at 30s.
+PROVIDER_DURATION_SEC = DEFAULT_PROVIDER_DURATION_SEC
 
 
 def log(event: str, **fields) -> None:
@@ -65,15 +70,36 @@ def log(event: str, **fields) -> None:
     print(json.dumps(entry, default=str), flush=True)
 
 
-def worker_state(r: MiniRedis, name: str) -> WorkerState:
+def worker_load(r: MiniRedis) -> dict:
+    """Jobs the manager has already handed to each local worker: pushed but not
+    yet claimed (jobs:pending:<w>) plus claimed and running (jobs:in_progress).
+
+    This is the source of truth for "is this worker occupied". The worker's own
+    heartbeat says busy only after its next 5s beat, so an item dispatched a
+    second after another would still see an idle worker and queue behind it.
+    """
+    load = {name: int(r.command("LLEN", f"jobs:pending:{name}") or 0) for name in WORKERS}
+    for raw in r.command("LRANGE", "jobs:in_progress", "0", "-1") or []:
+        try:
+            owner = json.loads(raw).get("worker")
+        except (json.JSONDecodeError, AttributeError):
+            continue
+        if owner in load:
+            load[owner] += 1
+    return load
+
+
+def worker_state(r: MiniRedis, name: str, load: dict | None = None) -> WorkerState:
     raw = r.command("GET", HEARTBEAT_PREFIX + name)
     if not raw:
         return WorkerState(name=name, healthy=False, busy=False)
+    occupied = bool(load and load.get(name))
     try:
         body = json.loads(raw)
     except json.JSONDecodeError:
-        return WorkerState(name=name, healthy=True, busy=False)
-    return WorkerState(name=name, healthy=True, busy=bool(body.get("busy")))
+        return WorkerState(name=name, healthy=True, busy=occupied)
+    return WorkerState(name=name, healthy=True,
+                       busy=bool(body.get("busy")) or occupied)
 
 
 # A stuck item is re-evaluated every POLL_SEC. Log an unchanged "nothing can take
@@ -159,7 +185,8 @@ def _job_payload(item: dict, worker: str, job_id: str, hedge: bool) -> str:
         "queue_item_id": item["id"],
         "prompt": item["prompt"],
         "target_duration_sec": effective_duration_sec(
-            worker, item["target_duration_sec"], LOCAL_MIN_DURATION_SEC),
+            worker, item["target_duration_sec"], LOCAL_MIN_DURATION_SEC,
+            PROVIDER_DURATION_SEC),
         "priority": "live",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "worker": worker,
@@ -313,6 +340,24 @@ def fire_due_hedges(r: MiniRedis, now: datetime) -> None:
             primary_job_id=record.get("primary_job_id"))
 
 
+def route_reason(mode: str, chosen: str, whealth: dict) -> str:
+    """Why this source, in words. Pure. Makes overflow visible in the log."""
+    local = chosen in WORKERS
+    busy = [n for n in WORKERS if whealth[n]["ok"] and whealth[n]["busy"]]
+    idle = [n for n in WORKERS if whealth[n]["ok"] and not whealth[n]["busy"]]
+    if chosen == "filler_pool":
+        return "no source available"
+    if local and idle:
+        return "local worker idle"
+    if local:
+        return "local busy, no provider available: queued behind the busy worker"
+    if mode == "hybrid" and busy:
+        return "local busy: overflowed to provider"
+    if mode == "hybrid":
+        return "no healthy local worker: provider"
+    return "paid_only: provider"
+
+
 def _no_source_reason(mode: str, chosen: str, phealth: dict) -> str | None:
     """One-line human explanation of why nothing can take an item. Pure."""
     if chosen != "filler_pool":
@@ -337,7 +382,8 @@ def dispatch_one(store, r: MiniRedis, now: datetime | None = None) -> bool:
     if item is None:
         return False
     now = now or datetime.now(timezone.utc)
-    states = [worker_state(r, name) for name in WORKERS]
+    load = worker_load(r)
+    states = [worker_state(r, name, load) for name in WORKERS]
     latency = load_latency(STATS_DB)
     depth = store.open_depth()
     avg_track = store.average_track_sec()
@@ -378,7 +424,10 @@ def dispatch_one(store, r: MiniRedis, now: datetime | None = None) -> bool:
             # WHY a source was or was not chosen: without these a stuck item
             # just repeats "filler_pool" with no hint of the cause.
             provider_health=phealth,
+            route_reason=route_reason(MODE, plan.worker, health_from(states, latency)),
             worker_ok={n: h["ok"] for n, h in health_from(states, latency).items()},
+            worker_busy={n: h["busy"] for n, h in health_from(states, latency).items()},
+            worker_load=load,
             no_source_reason=_no_source_reason(MODE, plan.worker, phealth)
             if plan.worker == "filler_pool" else None,
         )
@@ -393,7 +442,8 @@ def dispatch_one(store, r: MiniRedis, now: datetime | None = None) -> bool:
     log("item_assigned", queue_item_id=item["id"], worker=plan.worker,
         job_id=job_id, prompt=item["prompt"][:120],
         target_duration_sec=effective_duration_sec(
-            plan.worker, item["target_duration_sec"], LOCAL_MIN_DURATION_SEC))
+            plan.worker, item["target_duration_sec"], LOCAL_MIN_DURATION_SEC,
+            PROVIDER_DURATION_SEC))
     if plan.hedge_worker and plan.start_hedge_after_sec is not None:
         remember_hedge(r, item["id"], {
             "primary_job_id": job_id,
@@ -419,14 +469,18 @@ def main() -> int:
     try:
         require_paid_only_config(MODE, CONFIGURED_PROVIDERS)
         global LOCAL_MIN_DURATION_SEC
+        global PROVIDER_DURATION_SEC
         LOCAL_MIN_DURATION_SEC = parse_local_min_duration(
             os.environ.get("LOCAL_MIN_DURATION_SEC"))
+        PROVIDER_DURATION_SEC = parse_provider_duration(
+            os.environ.get("PROVIDER_DURATION_SEC"))
     except Exception as exc:
         log("manager_start_error", reason=str(exc))
         return 3
     store = connect(url)
     log("manager_start", tracks_dir=TRACKS_DIR, mode=MODE,
         local_min_duration_sec=LOCAL_MIN_DURATION_SEC,
+        provider_duration_sec=PROVIDER_DURATION_SEC,
         configured_providers=CONFIGURED_PROVIDERS,
         safety_margin_sec=SAFETY_MARGIN, stats_db=STATS_DB)
     redis = None
