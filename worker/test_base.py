@@ -17,6 +17,8 @@ from base import (
     InvalidDurationError,
     InvalidPromptError,
     LatencyTracker,
+    slugify,
+    track_stem,
     validate_request,
 )
 
@@ -91,6 +93,69 @@ class AudioResultTest(unittest.TestCase):
     def test_frozen(self):
         with self.assertRaises(dataclasses.FrozenInstanceError):
             self.RESULT.worker = "other"
+
+
+class SlugifyTest(unittest.TestCase):
+    def test_readable_slug(self):
+        self.assertEqual(slugify("Rainy Lo-Fi Piano!"), "rainy-lo-fi-piano")
+
+    def test_collapses_runs_and_trims(self):
+        self.assertEqual(slugify("  --hello,,,   world--  "), "hello-world")
+
+    def test_hostile_prompts_cannot_escape_the_directory(self):
+        for prompt in ("../../etc/passwd", "/abs/path", "a/b\\c", "..", ".hidden", "x\x00y"):
+            with self.subTest(prompt=prompt):
+                slug = slugify(prompt)
+                self.assertRegex(slug, r"^[a-z0-9-]+$")
+                self.assertFalse(slug.startswith((".", "-")))
+                self.assertNotIn("/", slug)
+
+    def test_accents_are_transliterated_not_dropped(self):
+        self.assertEqual(slugify("Café Sérénade"), "cafe-serenade")
+
+    def test_non_latin_only_falls_back(self):
+        self.assertEqual(slugify("夜の静かな音楽"), "track")
+        self.assertEqual(slugify("🎵🎶"), "track")
+
+    def test_non_text_and_empty_fall_back(self):
+        for value in (None, 5, "", "   ", "!!!"):
+            with self.subTest(value=value):
+                self.assertEqual(slugify(value), "track")
+
+    def test_length_is_capped_without_a_trailing_hyphen(self):
+        slug = slugify("word " * 100)
+        self.assertLessEqual(len(slug), 60)
+        self.assertFalse(slug.endswith("-"))
+
+    def test_is_lowercase_for_case_insensitive_filesystems(self):
+        self.assertEqual(slugify("LOUD Drums"), slugify("loud drums"))
+
+
+class TrackStemTest(unittest.TestCase):
+    JOB = "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+
+    def test_prompt_plus_short_job_id(self):
+        self.assertEqual(track_stem("Rainy lofi piano", self.JOB), "rainy-lofi-piano-3fa85f64")
+
+    def test_same_prompt_different_jobs_do_not_collide(self):
+        self.assertNotEqual(track_stem("lofi", "aaaaaaaa-1"), track_stem("lofi", "bbbbbbbb-2"))
+
+    def test_hedged_sides_of_one_item_do_not_collide(self):
+        # Both sides carry the same prompt but different job ids.
+        self.assertNotEqual(track_stem("same prompt", "11111111-x"),
+                            track_stem("same prompt", "22222222-y"))
+
+    def test_missing_job_id_falls_back_to_a_timestamp(self):
+        stem = track_stem("lofi", None)
+        self.assertRegex(stem, r"^lofi-\d{8}t\d{6}$")
+
+    def test_job_id_is_sanitized(self):
+        self.assertRegex(track_stem("lofi", "../../evil id"), r"^lofi-[a-z0-9]+$")
+
+    def test_stem_is_always_a_safe_filename(self):
+        stem = track_stem("a/b/../c " * 50, "x/y")
+        self.assertRegex(stem, r"^[a-z0-9-]+$")
+        self.assertLessEqual(len(stem), 60 + 1 + 20)
 
 
 if __name__ == "__main__":

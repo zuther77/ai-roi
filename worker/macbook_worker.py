@@ -25,7 +25,8 @@ import time
 from datetime import datetime, timezone
 
 from ace_client import AceStepClient, extract_audio_path
-from base import AudioResult, GenerationWorker, WorkerError, validate_request
+from base import (AudioResult, GenerationWorker, WorkerError, track_stem,
+                  validate_request)
 
 WORKER_NAME = "macbook"
 # Their macOS launcher binds the API server on localhost:8001.
@@ -66,7 +67,8 @@ class MacBookWorker(GenerationWorker):
     def is_busy(self) -> bool:
         return self._busy
 
-    async def generate(self, prompt: str, duration_sec: int) -> AudioResult:
+    async def generate(self, prompt: str, duration_sec: int,
+                       job_id: str | None = None) -> AudioResult:
         if self._busy:
             raise WorkerError("worker is busy: single generation at a time")
         prompt, duration_sec = validate_request(prompt, duration_sec)
@@ -75,17 +77,18 @@ class MacBookWorker(GenerationWorker):
             # The HTTP submit/poll cycle is blocking I/O; to_thread keeps
             # the async interface honest.
             return await asyncio.to_thread(
-                self._generate_sync, prompt, duration_sec)
+                self._generate_sync, prompt, duration_sec, job_id)
         except BaseException:
             self._busy = False
             raise
 
-    def _generate_sync(self, prompt: str, duration_sec: float) -> AudioResult:
+    def _generate_sync(self, prompt: str, duration_sec: float,
+                       job_id: str | None = None) -> AudioResult:
         if self._client.health() is None:
             self.ensure_server()
 
         os.makedirs(OUTPUT_DIR, exist_ok=True)
-        stem = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        stem = track_stem(prompt, job_id)
         t0 = time.monotonic()
         task_id = self._client.submit(prompt, duration_sec)
         log("task_submitted", task_id=task_id)

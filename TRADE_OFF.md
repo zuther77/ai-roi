@@ -315,3 +315,28 @@ Ordered roughly by the day/area they were decided.
 - **Given up:** opening the form from a laptop on the LAN without configuration.
 - **Why/how to undo:** owner decision. To reach it from another machine set
   `INTAKE_BIND=192.168.1.210` in `.env`.
+
+---
+
+## Track file names
+
+### Generated tracks are named after the prompt: `<prompt-slug>-<jobid8>.<ext>`
+- **Chosen:** all three workers build the name with `base.track_stem()`. The
+  slug is lowercase ASCII (accents transliterated), hyphen-separated, capped at
+  60 characters; the 8-character job id makes the name unique.
+- **Given up:**
+  1. **Prompt text now appears in file names.** Anyone who can list the NFS
+     tracks directory (any device on the LAN, by the existing owner-accepted
+     export) can read what was requested. Prompts were already moderated before
+     they could be enqueued and are stored in Postgres, so this widens who can
+     see them rather than creating new data.
+  2. **Names are lossy.** Only the first ~60 characters survive, punctuation and
+     case are dropped, and a prompt with no Latin letters (e.g. Japanese, emoji)
+     becomes `track-<jobid8>`. The full prompt is still in the database.
+  3. **Old files are not renamed.** Tracks generated earlier keep their UUID or
+     timestamp names; nothing reads names, so this is cosmetic.
+- **Why:** a bare UUID or timestamp made the tracks directory unreadable. The
+  job-id suffix is kept (not dropped) so identical prompts and hedged duplicates
+  never overwrite each other. Because the slug is restricted to `[a-z0-9-]`, a
+  hostile prompt cannot introduce a path separator, a dotfile, or a name that
+  collides on case-insensitive macOS.

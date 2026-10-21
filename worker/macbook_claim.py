@@ -124,6 +124,7 @@ def main() -> int:
                 result = asyncio.run(worker.generate(
                     job.get("prompt") or "",
                     int(job.get("target_duration_sec") or 30),
+                    job_id=job_id,
                 ))
                 file_name = Path(result.track_path).name
                 redis.command("LREM", IN_PROGRESS_KEY, "1", raw)

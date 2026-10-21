@@ -313,6 +313,17 @@ Interface unit tests (pure logic, run anywhere):
 
     cd worker && python3 -m unittest test_base -v
 
+## Day 5 — Generated track file names
+
+Every worker (MacBook, DELL, provider-worker) names a generated track
+`<prompt-slug>-<jobid8>.<ext>`, e.g. `rainy-lofi-piano-3fa85f64.mp3`, built by
+`base.track_stem()`. The slug is the first ~60 characters of the prompt,
+lowercased ASCII with single hyphens; the 8-character job id keeps identical
+prompts (and the two sides of a hedged item) from colliding. Prompts with no
+Latin letters fall back to `track-<jobid8>`. While a file is being written you
+will still only see `<name>.tmp.<ext>`, never a partial file under the final
+name. Tracks generated before this change keep their old names.
+
 ## Acceptance tests (Day 5)
 
 1. `nvidia-smi` inside the CUDA test container shows the RTX 2060.

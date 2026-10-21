@@ -52,7 +52,7 @@ from providers import (
     ProviderError,
     QuotaExhausted,
 )
-from base import WorkerError
+from base import WorkerError, track_stem
 
 COMPLETED_KEY = "jobs:completed"
 IN_PROGRESS_KEY = "jobs:in_progress"
@@ -240,9 +240,10 @@ def push_stats(r: MiniRedis, job_id, provider: str, gen_sec: float, target) -> N
     }))
 
 
-def _safe_stem(job_id) -> str:
-    import re
-    return re.sub(r"[^A-Za-z0-9._-]", "_", str(job_id or "job"))[:100]
+def output_path(job: dict, tracks_dir: str | None = None) -> str:
+    """Where this job's track is written: '<prompt-slug>-<jobid8>.mp3'."""
+    stem = track_stem(job.get("prompt"), job.get("job_id"))
+    return os.path.join(tracks_dir or TRACKS_DIR, f"{stem}.mp3")
 
 
 def handle_job(r: MiniRedis, provider_name: str, prov, raw: str,
@@ -266,9 +267,7 @@ def handle_job(r: MiniRedis, provider_name: str, prov, raw: str,
             reason="hedge_lost")
         return
 
-    stem = _safe_stem(job_id)
-    ext = ".mp3"
-    out_path = os.path.join(TRACKS_DIR, f"{stem}{ext}")
+    out_path = output_path(job)
     log("job_claimed", job_id=job_id, provider=provider_name,
         prompt=job.get("prompt"))
     try:

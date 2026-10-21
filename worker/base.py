@@ -25,7 +25,9 @@ health/self-assessment ahead of Day 8's Queue Manager.
 
 from __future__ import annotations
 
+import re
 import time
+import unicodedata
 from abc import ABC, abstractmethod
 from collections import deque
 from dataclasses import dataclass
@@ -99,6 +101,44 @@ def validate_request(prompt, duration_sec) -> tuple[str, float]:
     return prompt, float(duration_sec)
 
 
+# Track file names: "<prompt-slug>-<unique>" so a listing of the tracks dir is
+# readable ("rainy-lofi-piano-3fa85f64.mp3") instead of a bare UUID/timestamp.
+MAX_SLUG_CHARS = 60
+FALLBACK_SLUG = "track"
+
+
+def slugify(text: object, max_chars: int = MAX_SLUG_CHARS) -> str:
+    """Filename-safe slug of a prompt: lowercase ASCII letters/digits joined by
+    single hyphens, cut to max_chars. Pure.
+
+    Anything else (punctuation, '/', '..', control characters, emoji, CJK) is
+    dropped or becomes a separator, so a prompt can never produce a path
+    separator, a dotfile, or a name that differs only by case (macOS is
+    case-insensitive, Linux is not). A prompt with nothing representable
+    (e.g. only non-Latin text) falls back to "track" - the unique suffix still
+    keeps the file identifiable.
+    """
+    if not isinstance(text, str):
+        return FALLBACK_SLUG
+    ascii_text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    slug = re.sub(r"[^a-z0-9]+", "-", ascii_text.lower()).strip("-")
+    slug = slug[:max_chars].strip("-")
+    return slug or FALLBACK_SLUG
+
+
+def track_stem(prompt: object, unique: object = None) -> str:
+    """File stem (no extension) for a generated track: '<slug>-<unique8>'.
+
+    `unique` is normally the job id, so two identical prompts - or the two
+    sides of a hedged item - never collide. Without one, a UTC timestamp is
+    used. Pure apart from reading the clock in that fallback.
+    """
+    token = re.sub(r"[^A-Za-z0-9]", "", str(unique or ""))[:8].lower()
+    if not token:
+        token = time.strftime("%Y%m%dt%H%M%S", time.gmtime())
+    return f"{slugify(prompt)}-{token}"
+
+
 class LatencyTracker:
     """Rolling window of measured generation times. Pure, thread-safe
     enough for this project's one-generation-at-a-time workers."""
@@ -127,9 +167,11 @@ class GenerationWorker(ABC):
     _latency = LatencyTracker()
 
     @abstractmethod
-    async def generate(self, prompt: str, duration_sec: int) -> AudioResult:
+    async def generate(self, prompt: str, duration_sec: int,
+                       job_id: str | None = None) -> AudioResult:
         """Generate one track. Must validate the request first (typed
-        errors, never an unhandled crash) and report the measured time."""
+        errors, never an unhandled crash) and report the measured time.
+        `job_id` (optional) only feeds the output file name (track_stem)."""
 
     @abstractmethod
     def is_busy(self) -> bool:

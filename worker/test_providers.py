@@ -176,5 +176,22 @@ class ConfigTest(unittest.TestCase):
                                     "ELEVENLABS_API_KEY": "a"})
 
 
+class OutputNameTest(unittest.TestCase):
+    """Wiring check: provider_worker names tracks after the prompt."""
+
+    def test_output_path_uses_prompt_slug_and_job_id(self):
+        import provider_worker as pw
+        job = {"prompt": "Rainy lo-fi piano", "job_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6"}
+        self.assertEqual(pw.output_path(job, "/srv/radio/tracks"),
+                         "/srv/radio/tracks/rainy-lo-fi-piano-3fa85f64.mp3")
+
+    def test_hostile_prompt_stays_inside_the_tracks_dir(self):
+        import provider_worker as pw
+        job = {"prompt": "../../etc/cron.d/x", "job_id": "abc12345"}
+        path = pw.output_path(job, "/srv/radio/tracks")
+        self.assertEqual(os.path.dirname(path), "/srv/radio/tracks")
+        self.assertNotIn("..", os.path.basename(path))
+
+
 if __name__ == "__main__":
     unittest.main()

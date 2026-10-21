@@ -49,7 +49,6 @@ from __future__ import annotations
 import glob
 import json
 import os
-import re
 import socket
 import subprocess
 import sys
@@ -58,6 +57,7 @@ import time
 from datetime import datetime, timezone
 
 from ace_client import AceStepClient, extract_audio_path
+from base import track_stem
 from urllib.parse import unquote, urlparse
 
 # Day 8: the queue manager pushes onto a per-worker list. Override only
@@ -283,13 +283,6 @@ def push_stats(r: MiniRedis, job_id, gen_sec: float, target_sec) -> None:
     }))
 
 
-def safe_stem(job_id) -> str:
-    """Filename-safe form of the job id. UUIDs from the master are already
-    safe; this is defense against a malformed hand-pushed job."""
-    stem = re.sub(r"[^A-Za-z0-9._-]", "_", str(job_id or "job"))
-    return stem[:100]
-
-
 # ---------------------------------------------------------------------------
 # Generation (ACE-Step) — everything below runs only inside the container
 # ---------------------------------------------------------------------------
@@ -352,7 +345,7 @@ def claim_loop(r: MiniRedis, gen: Generator) -> None:
             continue
 
         job_id = job.get("job_id")
-        stem = safe_stem(job_id)
+        stem = track_stem(job.get("prompt"), job_id)
         write_lease(r, job)
         _busy["v"] = True
         log("job_claimed", job_id=job_id, prompt=job.get("prompt"),
