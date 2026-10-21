@@ -201,13 +201,24 @@ Ordered roughly by the day/area they were decided.
 - **Given up:** full-length songs by default.
 - **Why:** the radio generates 30s clips; the clip model is the natural match.
 
-### ElevenLabs credit balance is seeded/tracked coarsely, not scraped live
-- **Chosen:** `quota_remaining()` reads an optional seeded balance; live refinement
-  deferred.
-- **Given up:** always-accurate real-time credit tracking.
-- **Why:** Day 13 is isolation-only; precise live quota accounting belongs with the
-  Day 14 wiring and the `provider_quota` table. Keeping it coarse now avoids
-  guessing at response-header formats.
+### ElevenLabs credit balance: read live from the account (was: seeded by hand)
+- **History:** Day 13 shipped with only an optional hand-seeded
+  `ELEVENLABS_CREDIT_BALANCE`. With nothing seeded the balance was `None`, and
+  `choose_source` (design-spec 5.3: unknown == exhausted) refused to route to
+  ElevenLabs, so a `paid_only` deployment with just an API key silently stalled
+  every prompt on filler. Found by the owner on 2026-10-21; my bug.
+- **Chosen now:** the provider-worker reads `limit - used` from ElevenLabs'
+  `GET /v1/user/subscription` at startup, every 300s and after each job. A
+  seeded value is only a fallback until a live reading succeeds.
+- **Given up:** (1) one extra small GET per refresh; (2) it needs an API key that
+  may read the subscription - a restricted key without `user_read` falls back to
+  the seed or to "unknown", which still stalls `paid_only` (but now logs
+  `provider_quota_unknown` with the fix, and the manager's decision log says
+  why); (3) the endpoint reports "characters", which I am treating as the same
+  credit pool music draws from - unverified against a real music generation, so
+  confirm the number drops after one.
+- **Kept deliberately:** the spec's rule that an unknown balance counts as
+  exhausted. Relaxing it would let `paid_only` spend with no balance check.
 
 ---
 

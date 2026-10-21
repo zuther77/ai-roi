@@ -112,5 +112,94 @@ class DispatchTest(unittest.TestCase):
         self.assertEqual([j["prompt"] for j in self.r.jobs("macbook_air")], ["old item"])
 
 
+def eleven_alive(r, quota):
+    r.kv["worker:elevenlabs"] = json.dumps({"quota_remaining": quota})
+
+
+class PaidOnlyElevenLabsTest(unittest.TestCase):
+    """The reported failure: paid_only + only an ElevenLabs key, item stuck."""
+
+    def setUp(self):
+        self.store, self.r = memory_store(), FakeRedis()
+        self._saved = (manager.MODE, manager.CONFIGURED_PROVIDERS)
+        manager.MODE, manager.CONFIGURED_PROVIDERS = "paid_only", ["elevenlabs"]
+        alive(self.r, "macbook_air")  # a healthy Mac must still NOT be used
+
+    def tearDown(self):
+        manager.MODE, manager.CONFIGURED_PROVIDERS = self._saved
+
+    def test_known_balance_routes_to_elevenlabs_never_the_mac(self):
+        eleven_alive(self.r, 8200)
+        self.store.enqueue("calm piano", source="youtube_chat")
+        self.assertTrue(manager.dispatch_one(self.store, self.r))
+        self.assertEqual(len(self.r.jobs("elevenlabs")), 1)
+        self.assertEqual(self.r.jobs("macbook_air"), [])
+        # paid providers keep the item's own 30s, not the local 90s floor
+        self.assertEqual(self.r.jobs("elevenlabs")[0]["target_duration_sec"], 30)
+
+    def test_unknown_balance_is_the_reported_stall(self):
+        # Heartbeat alive but balance None -> treated as exhausted (spec 5.3).
+        eleven_alive(self.r, None)
+        self.store.enqueue("calm piano", source="youtube_chat")
+        self.assertFalse(manager.dispatch_one(self.store, self.r))
+        self.assertEqual(self.r.lists, {})
+
+    def test_zero_balance_does_not_route(self):
+        eleven_alive(self.r, 0)
+        self.store.enqueue("calm piano", source="youtube_chat")
+        self.assertFalse(manager.dispatch_one(self.store, self.r))
+
+
+class NoSourceReasonTest(unittest.TestCase):
+    def ph(self, el_ok, el_q, gm_ok=False):
+        return {"elevenlabs": {"ok": el_ok, "quota_remaining": el_q},
+                "gemini_lyra": {"ok": gm_ok, "quota_remaining": None}}
+
+    def test_names_the_unknown_balance_and_the_fix(self):
+        why = manager._no_source_reason("paid_only", "filler_pool", self.ph(True, None))
+        self.assertIn("balance unknown", why)
+        self.assertIn("ELEVENLABS_CREDIT_BALANCE", why)
+        self.assertIn("never uses local", why)
+
+    def test_names_a_missing_heartbeat(self):
+        why = manager._no_source_reason("paid_only", "filler_pool", self.ph(False, 0))
+        self.assertIn("no key or provider-worker heartbeat", why)
+
+    def test_none_when_a_source_was_chosen(self):
+        self.assertIsNone(manager._no_source_reason("paid_only", "elevenlabs", self.ph(True, 5)))
+
+    def test_local_modes_get_a_plain_reason(self):
+        self.assertEqual(manager._no_source_reason("local_only", "filler_pool", self.ph(False, 0)),
+                         "no healthy local worker")
+
+
+class DecisionLogDedupeTest(unittest.TestCase):
+    def test_first_time_logs(self):
+        self.assertTrue(manager.should_log_decision("a", "sig", 0.0, {}))
+
+    def test_unchanged_decision_is_suppressed_then_repeats_after_a_minute(self):
+        mem = {}
+        self.assertTrue(manager.should_log_decision("a", "sig", 0.0, mem))
+        self.assertFalse(manager.should_log_decision("a", "sig", 2.0, mem))
+        self.assertFalse(manager.should_log_decision("a", "sig", 59.0, mem))
+        self.assertTrue(manager.should_log_decision("a", "sig", 61.0, mem))
+
+    def test_a_changed_decision_logs_immediately(self):
+        mem = {}
+        manager.should_log_decision("a", "filler_pool", 0.0, mem)
+        self.assertTrue(manager.should_log_decision("a", "elevenlabs", 1.0, mem))
+
+    def test_items_are_tracked_independently(self):
+        mem = {}
+        manager.should_log_decision("a", "sig", 0.0, mem)
+        self.assertTrue(manager.should_log_decision("b", "sig", 1.0, mem))
+
+    def test_memory_stays_bounded(self):
+        mem = {}
+        for i in range(2000):
+            manager.should_log_decision(f"item{i}", "sig", float(i), mem)
+        self.assertLessEqual(len(mem), 501)
+
+
 if __name__ == "__main__":
     unittest.main()

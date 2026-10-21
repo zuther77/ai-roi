@@ -193,5 +193,69 @@ class OutputNameTest(unittest.TestCase):
         self.assertNotIn("..", os.path.basename(path))
 
 
+class ElevenLabsCreditsTest(unittest.TestCase):
+    SUB = json.dumps({"character_count": 1800, "character_limit": 10000}).encode()
+
+    def test_remaining_is_limit_minus_count(self):
+        self.assertEqual(p.parse_elevenlabs_credits(self.SUB), 8200)
+
+    def test_never_negative(self):
+        over = json.dumps({"character_count": 12000, "character_limit": 10000}).encode()
+        self.assertEqual(p.parse_elevenlabs_credits(over), 0)
+
+    def test_malformed_raises_a_typed_error(self):
+        for bad in (b"not json", b"{}", b'{"character_limit": "x", "character_count": 1}'):
+            with self.subTest(bad=bad):
+                with self.assertRaises(p.ProviderError):
+                    p.parse_elevenlabs_credits(bad)
+
+    def _prov(self, get_result, seed=None):
+        prov = p.ElevenLabsProvider(api_key="k", post=fake_post(200, {}, b"x"))
+        prov._credit_balance = seed
+        return prov, (lambda url, headers: get_result)
+
+    def test_refresh_reads_the_live_balance(self):
+        prov, get = self._prov((200, {}, self.SUB))
+        self.assertEqual(prov.refresh_quota(get), 8200)
+        self.assertEqual(prov.quota_remaining(), 8200)
+
+    def test_refresh_sends_the_api_key_header(self):
+        seen = {}
+        prov = p.ElevenLabsProvider(api_key="secret", post=fake_post(200, {}, b"x"))
+        prov.refresh_quota(lambda url, headers: (seen.update(headers=headers, url=url)
+                                                 or (200, {}, self.SUB)))
+        self.assertEqual(seen["headers"]["xi-api-key"], "secret")
+        self.assertTrue(seen["url"].endswith("/v1/user/subscription"))
+
+    def test_permission_error_keeps_the_seed_and_explains(self):
+        prov, get = self._prov((401, {}, b"{}"), seed=5000)
+        self.assertIsNone(prov.refresh_quota(get))
+        self.assertEqual(prov.quota_remaining(), 5000)          # seed survives
+        self.assertIn("user_read", prov.quota_error)
+
+    def test_failed_lookup_with_no_seed_stays_unknown(self):
+        prov, get = self._prov((500, {}, b""))
+        self.assertIsNone(prov.refresh_quota(get))
+        self.assertIsNone(prov.quota_remaining())
+
+    def test_network_error_never_raises(self):
+        prov = p.ElevenLabsProvider(api_key="k", post=fake_post(200, {}, b"x"))
+
+        def boom(url, headers):
+            raise OSError("down")
+
+        self.assertIsNone(prov.refresh_quota(boom))
+
+    def test_a_later_failure_does_not_erase_a_good_reading(self):
+        prov, get = self._prov((200, {}, self.SUB))
+        prov.refresh_quota(get)
+        self.assertIsNone(prov.refresh_quota(lambda u, h: (500, {}, b"")))
+        self.assertEqual(prov.quota_remaining(), 8200)
+
+    def test_no_key_means_no_lookup(self):
+        prov = p.ElevenLabsProvider(api_key="", post=fake_post(200, {}, b"x"))
+        self.assertIsNone(prov.refresh_quota(lambda u, h: self.fail("must not call")))
+
+
 if __name__ == "__main__":
     unittest.main()

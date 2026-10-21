@@ -110,6 +110,17 @@ def _http_post(url: str, headers: dict, body: bytes):
         return exc.code, dict(exc.headers or {}), exc.read()
 
 
+def _http_get(url: str, headers: dict):
+    req = urllib.request.Request(url, method="GET")
+    for k, v in headers.items():
+        req.add_header(k, v)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.status, dict(resp.headers), resp.read()
+    except urllib.error.HTTPError as exc:
+        return exc.code, dict(exc.headers or {}), exc.read()
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -198,6 +209,24 @@ def classify_elevenlabs_error(status: int, body: bytes) -> ProviderError:
     return ProviderError(f"elevenlabs error {status}: {text[:200]}")
 
 
+SUBSCRIPTION_URL = "https://api.elevenlabs.io/v1/user/subscription"
+
+
+def parse_elevenlabs_credits(body: bytes | dict) -> int:
+    """Remaining credits from a GET /v1/user/subscription response. Pure.
+
+    remaining = character_limit - character_count (ElevenLabs still names the
+    fields "character"; they are the same credit pool music draws from).
+    Clamped at 0. Raises ProviderError on a malformed body so the caller can
+    fall back instead of reporting a made-up number.
+    """
+    try:
+        data = body if isinstance(body, dict) else json.loads(body.decode("utf-8", "replace"))
+        return max(0, int(data["character_limit"]) - int(data["character_count"]))
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise ProviderError(f"elevenlabs: unreadable subscription response: {exc}") from exc
+
+
 class ElevenLabsProvider(_LatencyMixin, MusicProvider):
     """Credit-capped provider. Lazy: constructing with no key is fine; the
     error only fires if generate() is actually called without a key."""
@@ -220,6 +249,35 @@ class ElevenLabsProvider(_LatencyMixin, MusicProvider):
 
     def quota_remaining(self) -> int | None:
         return self._credit_balance
+
+    def refresh_quota(self, get: Callable | None = None) -> int | None:
+        """Read the live credit balance from ElevenLabs and remember it.
+
+        Returns the balance, or None if it could not be read - in which case
+        the previous value (a seeded ELEVENLABS_CREDIT_BALANCE, or an earlier
+        successful lookup) is kept rather than overwritten with a guess. Never
+        raises: a failed lookup must not take the worker down.
+        """
+        if not self._api_key:
+            return None
+        get = get or _http_get
+        try:
+            status, _h, body = get(SUBSCRIPTION_URL, {"xi-api-key": self._api_key})
+            if status == 401 or status == 403:
+                self.quota_error = (f"http {status}: the API key cannot read the account "
+                                    "subscription (needs the 'user_read' permission)")
+                return None
+            if status < 200 or status >= 300:
+                self.quota_error = f"http {status}"
+                return None
+            self._credit_balance = parse_elevenlabs_credits(body)
+            self.quota_error = ""
+            return self._credit_balance
+        except Exception as exc:  # network, parse, anything: keep the old value
+            self.quota_error = f"{type(exc).__name__}: {str(exc)[:120]}"
+            return None
+
+    quota_error: str = ""
 
     def generate(self, prompt: str, duration_sec: int, out_path: str) -> AudioResult:
         prompt, duration = validate_request(prompt, duration_sec)

@@ -76,6 +76,28 @@ def worker_state(r: MiniRedis, name: str) -> WorkerState:
     return WorkerState(name=name, healthy=True, busy=bool(body.get("busy")))
 
 
+# A stuck item is re-evaluated every POLL_SEC. Log an unchanged "nothing can take
+# this" decision once, then again at most every REPEAT_LOG_SEC, instead of one
+# near-identical line every 2 seconds forever.
+REPEAT_LOG_SEC = 60.0
+_last_logged: dict = {}
+
+
+def should_log_decision(item_id: str, signature: str, now: float,
+                        memory: dict | None = None) -> bool:
+    """True the first time, when the decision changes, or after REPEAT_LOG_SEC.
+    Pure given `memory` (defaults to module state)."""
+    mem = _last_logged if memory is None else memory
+    prev = mem.get(item_id)
+    if prev is not None and prev[0] == signature and now - prev[1] < REPEAT_LOG_SEC:
+        return False
+    mem[item_id] = (signature, now)
+    if len(mem) > 500:  # bounded: forget the oldest
+        for k in sorted(mem, key=lambda k: mem[k][1])[:250]:
+            mem.pop(k, None)
+    return True
+
+
 def provider_heartbeats(r: MiniRedis) -> dict:
     """Read worker:<provider> heartbeats. Returns {provider: parsed|None}.
 
@@ -291,6 +313,25 @@ def fire_due_hedges(r: MiniRedis, now: datetime) -> None:
             primary_job_id=record.get("primary_job_id"))
 
 
+def _no_source_reason(mode: str, chosen: str, phealth: dict) -> str | None:
+    """One-line human explanation of why nothing can take an item. Pure."""
+    if chosen != "filler_pool":
+        return None
+    if mode == "paid_only":
+        el, gm = phealth["elevenlabs"], phealth["gemini_lyra"]
+        parts = []
+        if not el["ok"]:
+            parts.append("elevenlabs: no key or provider-worker heartbeat")
+        elif not (el["quota_remaining"] or 0) > 0:
+            parts.append("elevenlabs: credit balance unknown or 0 (unknown counts as "
+                         "exhausted) - see provider-worker logs / set "
+                         "ELEVENLABS_CREDIT_BALANCE")
+        if not gm["ok"]:
+            parts.append("gemini_lyra: no key or heartbeat")
+        return "paid_only never uses local workers; " + "; ".join(parts)
+    return "no healthy local worker" + (" and no usable provider" if mode == "hybrid" else "")
+
+
 def dispatch_one(store, r: MiniRedis, now: datetime | None = None) -> bool:
     item = store.next_queued()
     if item is None:
@@ -318,21 +359,29 @@ def dispatch_one(store, r: MiniRedis, now: datetime | None = None) -> bool:
         last_assigned=store.last_assigned_worker(),
         safety_margin_sec=SAFETY_MARGIN,
     )
-    log(
-        "source_chosen",
-        queue_item_id=item["id"],
-        mode=MODE,
-        worker=plan.worker,
-        naive_worker=plan.naive_worker,
-        policy=plan.policy,
-        queue_depth=plan.queue_depth,
-        time_budget_sec=round(plan.time_budget_sec, 3),
-        avg_latency_sec=plan.avg_latency_sec,
-        avg_track_sec=avg_track,
-        safety_margin_sec=SAFETY_MARGIN,
-        hedge_worker=plan.hedge_worker,
-        start_hedge_after_sec=plan.start_hedge_after_sec,
-    )
+    if should_log_decision(
+            item["id"], f"{MODE}|{plan.worker}|{plan.hedge_worker}", time.monotonic()):
+        log(
+            "source_chosen",
+            queue_item_id=item["id"],
+            mode=MODE,
+            worker=plan.worker,
+            naive_worker=plan.naive_worker,
+            policy=plan.policy,
+            queue_depth=plan.queue_depth,
+            time_budget_sec=round(plan.time_budget_sec, 3),
+            avg_latency_sec=plan.avg_latency_sec,
+            avg_track_sec=avg_track,
+            safety_margin_sec=SAFETY_MARGIN,
+            hedge_worker=plan.hedge_worker,
+            start_hedge_after_sec=plan.start_hedge_after_sec,
+            # WHY a source was or was not chosen: without these a stuck item
+            # just repeats "filler_pool" with no hint of the cause.
+            provider_health=phealth,
+            worker_ok={n: h["ok"] for n, h in health_from(states, latency).items()},
+            no_source_reason=_no_source_reason(MODE, plan.worker, phealth)
+            if plan.worker == "filler_pool" else None,
+        )
     if plan.worker == "filler_pool":
         return False
     deadline = now + timedelta(seconds=plan.time_budget_sec)

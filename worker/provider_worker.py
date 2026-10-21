@@ -65,6 +65,10 @@ DEFAULT_REDIS_URL = "redis://redis:6379/0"
 # Provider calls are fast relative to local generation. A generous fixed
 # lease is fine; the reaper requeues only if the worker dies mid-call.
 PROVIDER_LEASE_SEC = int(os.environ.get("PROVIDER_LEASE_SEC", "600"))
+# How often to re-read the live ElevenLabs credit balance (1 cheap GET). Also
+# re-read after every job. Without a readable balance the manager treats the
+# provider as out of credits (design-spec 5.3: unknown == exhausted).
+QUOTA_REFRESH_SEC = float(os.environ.get("PROVIDER_QUOTA_REFRESH_SEC", "300"))
 
 # name -> factory. Only providers with a key become active.
 PROVIDER_FACTORIES = {
@@ -171,6 +175,32 @@ def active_providers(env: dict) -> dict:
     return active
 
 
+def refresh_provider_quota(name: str, prov) -> None:
+    """Re-read a provider's live balance (if it has one) and log the outcome.
+
+    Logs when the balance becomes known, changes by a lot, or cannot be read -
+    the last one loudly, because an unreadable balance silently stops the
+    manager routing to this provider.
+    """
+    refresh = getattr(prov, "refresh_quota", None)
+    if refresh is None:
+        return
+    before = prov.quota_remaining()
+    after = refresh()
+    if after is not None:
+        if before != after:
+            log("provider_quota", provider=name, quota_remaining=after,
+                previous=before)
+        return
+    if prov.quota_remaining() is None:
+        log("provider_quota_unknown", provider=name,
+            error=getattr(prov, "quota_error", ""),
+            hint="the manager treats an unknown balance as out of credits and "
+                 "will not route to this provider. Grant the API key the "
+                 "'user_read' permission, or set ELEVENLABS_CREDIT_BALANCE to "
+                 "seed a number.")
+
+
 def start_heartbeat(url: str, password: str, providers: dict) -> None:
     """Publish worker:<provider> with quota_remaining. Own socket: the claim
     connection blocks in BRPOPLPUSH and cannot be shared.
@@ -182,7 +212,13 @@ def start_heartbeat(url: str, password: str, providers: dict) -> None:
 
     def loop() -> None:
         conn = None
+        last_refresh = 0.0
         while True:
+            if time.monotonic() - last_refresh >= QUOTA_REFRESH_SEC:
+                last_refresh = time.monotonic()
+                for pname, pobj in providers.items():
+                    if pname not in disabled:
+                        refresh_provider_quota(pname, pobj)
             try:
                 if conn is None:
                     conn = MiniRedis(url, password)
@@ -282,6 +318,7 @@ def handle_job(r: MiniRedis, provider_name: str, prov, raw: str,
                        result.generation_sec, True)
         log("job_done", job_id=job_id, provider=provider_name,
             track_path=out_path, generation_sec=result.generation_sec)
+        refresh_provider_quota(provider_name, prov)
     except QuotaExhausted as exc:
         # Fail the item AND stop routing to this provider (drop heartbeat).
         acknowledge(r, raw)
