@@ -8,6 +8,8 @@ import base64
 import json
 import os
 import tempfile
+import threading
+import time
 import unittest
 
 import providers as p
@@ -255,6 +257,114 @@ class ElevenLabsCreditsTest(unittest.TestCase):
     def test_no_key_means_no_lookup(self):
         prov = p.ElevenLabsProvider(api_key="", post=fake_post(200, {}, b"x"))
         self.assertIsNone(prov.refresh_quota(lambda u, h: self.fail("must not call")))
+
+
+class QuotaRefresherTest(unittest.TestCase):
+    """provider_worker: the balance lookup must never starve the heartbeat, and
+    its outcome must always be visible in the logs."""
+
+    def setUp(self):
+        import provider_worker as pw
+        self.pw = pw
+        pw._quota_state.clear()
+        self._get = p._http_get
+        self.logs = []
+        self._log = pw.log
+        pw.log = lambda event, **f: self.logs.append((event, f))
+
+    def tearDown(self):
+        p._http_get = self._get
+        self.pw.log = self._log
+
+    def prov(self, seed=None):
+        prov = p.ElevenLabsProvider(api_key="k", post=fake_post(200, {}, b"x"))
+        prov._credit_balance = seed
+        return prov
+
+    def events(self):
+        return [e for e, _ in self.logs]
+
+    def test_success_is_logged_the_first_time(self):
+        p._http_get = lambda u, h: (200, {}, json.dumps(
+            {"character_count": 1800, "character_limit": 10000}).encode())
+        self.pw.refresh_provider_quota("elevenlabs", self.prov())
+        self.assertEqual(self.events(), ["provider_quota"])
+        self.assertEqual(self.logs[0][1]["quota_remaining"], 8200)
+
+    def test_unchanged_balance_is_not_logged_again(self):
+        p._http_get = lambda u, h: (200, {}, json.dumps(
+            {"character_count": 1800, "character_limit": 10000}).encode())
+        prov = self.prov()
+        self.pw.refresh_provider_quota("elevenlabs", prov)
+        self.pw.refresh_provider_quota("elevenlabs", prov)
+        self.assertEqual(self.events(), ["provider_quota"])
+
+    def test_failure_with_nothing_seeded_logs_unknown(self):
+        p._http_get = lambda u, h: (401, {}, b"{}")
+        self.pw.refresh_provider_quota("elevenlabs", self.prov())
+        self.assertEqual(self.events(), ["provider_quota_unknown"])
+        self.assertIn("user_read", self.logs[0][1]["error"])
+
+    def test_failure_with_a_seed_is_NOT_silent(self):
+        # The reported gap: a seeded balance used to hide a broken lookup.
+        p._http_get = lambda u, h: (401, {}, b"{}")
+        self.pw.refresh_provider_quota("elevenlabs", self.prov(seed=10000))
+        self.assertEqual(self.events(), ["provider_quota_stale"])
+        self.assertEqual(self.logs[0][1]["using"], 10000)
+
+    def test_persistent_failure_is_reported_once_then_hourly(self):
+        p._http_get = lambda u, h: (500, {}, b"")
+        prov = self.prov()
+        self.pw.refresh_provider_quota("elevenlabs", prov, now=0.0)
+        self.pw.refresh_provider_quota("elevenlabs", prov, now=300.0)
+        self.pw.refresh_provider_quota("elevenlabs", prov, now=3000.0)
+        self.assertEqual(len(self.logs), 1)
+        self.pw.refresh_provider_quota("elevenlabs", prov, now=3601.0)
+        self.assertEqual(len(self.logs), 2)
+
+    def test_recovery_after_failure_is_logged(self):
+        prov = self.prov()
+        p._http_get = lambda u, h: (500, {}, b"")
+        self.pw.refresh_provider_quota("elevenlabs", prov, now=0.0)
+        p._http_get = lambda u, h: (200, {}, json.dumps(
+            {"character_count": 0, "character_limit": 5000}).encode())
+        self.pw.refresh_provider_quota("elevenlabs", prov, now=10.0)
+        self.assertEqual(self.events(), ["provider_quota_unknown", "provider_quota"])
+
+    def test_a_slow_lookup_does_not_delay_the_first_heartbeat(self):
+        import time
+        sent = []
+
+        class Conn:
+            def command(self, *a):
+                if a[0] == "SETEX":
+                    sent.append((time.monotonic(), json.loads(a[3])))
+
+        self.pw.MiniRedis = lambda url, pw_: Conn()
+        started = threading.Event()
+
+        def slow_get(u, h):
+            started.set()
+            time.sleep(1.5)
+            return 200, {}, json.dumps({"character_count": 0, "character_limit": 50}).encode()
+
+        p._http_get = slow_get
+        prov = self.prov()
+        t0 = time.monotonic()
+        disabled = self.pw.start_heartbeat("redis://x", "x", {"elevenlabs": prov})
+        self.pw.start_quota_refresher({"elevenlabs": prov}, disabled)
+        self.assertTrue(started.wait(2))               # lookup is in flight...
+        time.sleep(0.3)
+        self.assertTrue(sent, "no heartbeat while the lookup was still running")
+        self.assertLess(sent[0][0] - t0, 1.0)          # ...and did not hold it up
+        self.assertIsNone(sent[0][1]["quota_remaining"])  # unknown until it returns
+        time.sleep(1.5 + 5.5)                          # lookup done + one heartbeat cycle
+        self.assertEqual(sent[-1][1]["quota_remaining"], 50)
+
+    def test_a_finished_job_wakes_the_refresher_without_blocking(self):
+        self.pw._quota_wakeup.clear()
+        self.pw._quota_wakeup.set()
+        self.assertTrue(self.pw._quota_wakeup.is_set())
 
 
 if __name__ == "__main__":

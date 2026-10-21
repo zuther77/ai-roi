@@ -115,7 +115,8 @@ def _http_get(url: str, headers: dict):
     for k, v in headers.items():
         req.add_header(k, v)
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        # Short: this is a tiny metadata call, and nothing should wait on it.
+        with urllib.request.urlopen(req, timeout=10) as resp:
             return resp.status, dict(resp.headers), resp.read()
     except urllib.error.HTTPError as exc:
         return exc.code, dict(exc.headers or {}), exc.read()

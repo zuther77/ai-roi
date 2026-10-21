@@ -175,30 +175,80 @@ def active_providers(env: dict) -> dict:
     return active
 
 
-def refresh_provider_quota(name: str, prov) -> None:
-    """Re-read a provider's live balance (if it has one) and log the outcome.
+# What the last quota log said, per provider, so a persistent failure is
+# reported once (then hourly) rather than every refresh.
+_quota_state: dict = {}
+_QUOTA_REPEAT_SEC = 3600.0
 
-    Logs when the balance becomes known, changes by a lot, or cannot be read -
-    the last one loudly, because an unreadable balance silently stops the
-    manager routing to this provider.
+
+def refresh_provider_quota(name: str, prov, now: float | None = None) -> None:
+    """Re-read a provider's live balance (if it has one) and LOG THE OUTCOME.
+
+    The first attempt always logs, success or failure, so "no provider_quota
+    line" can never be ambiguous again. After that it logs on a change, and
+    repeats a persistent failure at most hourly.
+
+    A failure is reported even when a seeded/earlier balance exists (the old
+    version stayed silent then): the seed keeps routing alive, but the operator
+    must know the live lookup is not working.
     """
     refresh = getattr(prov, "refresh_quota", None)
     if refresh is None:
         return
+    now = time.monotonic() if now is None else now
     before = prov.quota_remaining()
     after = refresh()
+    prev = _quota_state.get(name)  # (kind, value, when) | None
+
     if after is not None:
-        if before != after:
+        if prev is None or prev[0] != "ok" or prev[1] != after:
             log("provider_quota", provider=name, quota_remaining=after,
-                previous=before)
+                previous=before, source="live")
+        _quota_state[name] = ("ok", after, now)
         return
-    if prov.quota_remaining() is None:
-        log("provider_quota_unknown", provider=name,
-            error=getattr(prov, "quota_error", ""),
-            hint="the manager treats an unknown balance as out of credits and "
-                 "will not route to this provider. Grant the API key the "
-                 "'user_read' permission, or set ELEVENLABS_CREDIT_BALANCE to "
-                 "seed a number.")
+
+    error = getattr(prov, "quota_error", "") or "unknown error"
+    kept = prov.quota_remaining()  # a seed or an earlier good reading, if any
+    kind = "stale" if kept is not None else "unknown"
+    if prev is None or prev[0] != kind or prev[1] != error or now - prev[2] >= _QUOTA_REPEAT_SEC:
+        if kept is None:
+            log("provider_quota_unknown", provider=name, error=error,
+                hint="the manager treats an unknown balance as out of credits and "
+                     "will not route to this provider. Grant the API key the "
+                     "'user_read' permission, or set ELEVENLABS_CREDIT_BALANCE to "
+                     "seed a number.")
+        else:
+            log("provider_quota_stale", provider=name, error=error,
+                using=kept,
+                hint="live balance lookup failed; routing continues on the last "
+                     "known/seeded value, which will not reflect credits spent.")
+        _quota_state[name] = (kind, error, now)
+
+
+_quota_wakeup = threading.Event()
+
+
+def start_quota_refresher(providers: dict, disabled: set) -> None:
+    """Keep each provider's balance fresh in a thread of its own.
+
+    Separate from the heartbeat on purpose: the lookup is a network call that
+    can take seconds (or hang), and the heartbeat has a 20s TTL - sharing a loop
+    let a slow ElevenLabs delay the heartbeat and flap the provider to "down".
+    Refreshes immediately at startup, every QUOTA_REFRESH_SEC, and whenever a
+    job finishes (the event is set by handle_job).
+    """
+    def loop() -> None:
+        while True:
+            for pname, pobj in providers.items():
+                if pname not in disabled:
+                    try:
+                        refresh_provider_quota(pname, pobj)
+                    except Exception as exc:  # never let this thread die
+                        log("provider_quota_error", provider=pname, error=str(exc)[:200])
+            _quota_wakeup.wait(QUOTA_REFRESH_SEC)
+            _quota_wakeup.clear()
+
+    threading.Thread(target=loop, name="quota-refresh", daemon=True).start()
 
 
 def start_heartbeat(url: str, password: str, providers: dict) -> None:
@@ -212,13 +262,7 @@ def start_heartbeat(url: str, password: str, providers: dict) -> None:
 
     def loop() -> None:
         conn = None
-        last_refresh = 0.0
         while True:
-            if time.monotonic() - last_refresh >= QUOTA_REFRESH_SEC:
-                last_refresh = time.monotonic()
-                for pname, pobj in providers.items():
-                    if pname not in disabled:
-                        refresh_provider_quota(pname, pobj)
             try:
                 if conn is None:
                     conn = MiniRedis(url, password)
@@ -318,7 +362,7 @@ def handle_job(r: MiniRedis, provider_name: str, prov, raw: str,
                        result.generation_sec, True)
         log("job_done", job_id=job_id, provider=provider_name,
             track_path=out_path, generation_sec=result.generation_sec)
-        refresh_provider_quota(provider_name, prov)
+        _quota_wakeup.set()  # re-read the balance without blocking the claim loop
     except QuotaExhausted as exc:
         # Fail the item AND stop routing to this provider (drop heartbeat).
         acknowledge(r, raw)
@@ -379,6 +423,7 @@ def main() -> int:
     os.makedirs(TRACKS_DIR, exist_ok=True)
     log("provider_worker_start", providers=list(providers), tracks_dir=TRACKS_DIR)
     disabled = start_heartbeat(url, password, providers)
+    start_quota_refresher(providers, disabled)
 
     r = None
     while True:
