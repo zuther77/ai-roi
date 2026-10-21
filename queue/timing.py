@@ -26,11 +26,51 @@ from selection import CANONICAL, WorkerState, choose_worker
 # Day 8 stored position * 180, which pushed every deadline far past a
 # 95s generation and would hide the hedge. Live targets are 30s clips.
 FALLBACK_AVG_TRACK_SEC = 30.0
+
+# Owner request: local workers should produce at least this much music per
+# track. Applied by effective_duration_sec() when the manager builds a job for
+# a local worker; paid providers keep the item's own length (a paid track costs
+# per second, and the Gemini clip model is fixed at 30s). Env: LOCAL_MIN_DURATION_SEC.
+DEFAULT_LOCAL_MIN_DURATION_SEC = 90.0
+# Bounds mirror worker/base.py MIN/MAX_DURATION_SEC: a floor outside them would
+# make every local job fail validation, so a bad value is rejected at startup.
+MIN_ALLOWED_DURATION_SEC = 5.0
+MAX_ALLOWED_DURATION_SEC = 300.0
 ROLLING_WINDOW = 20
 SAFETY_MARGIN_SEC = 120.0
 MIN_HEALTHY_DEPTH = 5
 
 LOCAL_WORKERS = CANONICAL
+
+
+def parse_local_min_duration(raw: str | None) -> float:
+    """LOCAL_MIN_DURATION_SEC -> seconds. Blank/unset -> the default. Raises
+    ValueError for non-numeric or out-of-range values (fail loud at startup
+    rather than failing every local job later). Pure."""
+    text = (raw or "").strip()
+    if not text:
+        return DEFAULT_LOCAL_MIN_DURATION_SEC
+    try:
+        value = float(text)
+    except ValueError:
+        raise ValueError(f"LOCAL_MIN_DURATION_SEC={raw!r} is not a number") from None
+    if not (MIN_ALLOWED_DURATION_SEC <= value <= MAX_ALLOWED_DURATION_SEC):
+        raise ValueError(
+            f"LOCAL_MIN_DURATION_SEC={value:g} is outside the allowed range "
+            f"[{MIN_ALLOWED_DURATION_SEC:g}, {MAX_ALLOWED_DURATION_SEC:g}] seconds")
+    return value
+
+
+def effective_duration_sec(worker: str, requested: float, local_min: float) -> int:
+    """Seconds of music to request from `worker`. Pure.
+
+    Local workers get at least `local_min` (rounded up); a longer request is
+    kept. Paid providers get exactly what the item asked for.
+    """
+    asked = int(math.ceil(float(requested)))
+    if worker in LOCAL_WORKERS:
+        return max(asked, int(math.ceil(local_min)))
+    return asked
 
 
 def rolling_average(samples: list[float], window: int = ROLLING_WINDOW) -> float | None:

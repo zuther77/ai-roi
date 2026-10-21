@@ -220,6 +220,99 @@ class HedgePolicyTest(unittest.TestCase):
         )
 
 
+
+# ---------------------------------------------------------------------------
+# Local workers produce at least LOCAL_MIN_DURATION_SEC of music
+# ---------------------------------------------------------------------------
+
+import json  # noqa: E402
+
+from timing import (  # noqa: E402
+    DEFAULT_LOCAL_MIN_DURATION_SEC,
+    effective_duration_sec,
+    parse_local_min_duration,
+)
+
+
+class ParseLocalMinTest(unittest.TestCase):
+    def test_default_is_90(self):
+        self.assertEqual(DEFAULT_LOCAL_MIN_DURATION_SEC, 90.0)
+        self.assertEqual(parse_local_min_duration(None), 90.0)
+        self.assertEqual(parse_local_min_duration("  "), 90.0)
+
+    def test_valid_override(self):
+        self.assertEqual(parse_local_min_duration("120"), 120.0)
+        self.assertEqual(parse_local_min_duration("45.5"), 45.5)
+
+    def test_rejects_garbage_and_out_of_range(self):
+        for bad in ("abc", "4", "301", "-90", "nan"):
+            with self.subTest(value=bad):
+                with self.assertRaises(ValueError):
+                    parse_local_min_duration(bad)
+
+
+class EffectiveDurationTest(unittest.TestCase):
+    def test_local_workers_are_raised_to_the_floor(self):
+        for worker in ("macbook_air", "dell"):
+            with self.subTest(worker=worker):
+                self.assertEqual(effective_duration_sec(worker, 30, 90), 90)
+
+    def test_a_longer_request_is_kept(self):
+        self.assertEqual(effective_duration_sec("macbook_air", 150, 90), 150)
+
+    def test_exactly_at_the_floor(self):
+        self.assertEqual(effective_duration_sec("macbook_air", 90, 90), 90)
+
+    def test_fractional_values_round_up_never_below_the_minimum(self):
+        self.assertEqual(effective_duration_sec("macbook_air", 30, 89.2), 90)
+        self.assertEqual(effective_duration_sec("macbook_air", 90.4, 90), 91)
+
+    def test_paid_providers_keep_the_items_own_length(self):
+        for provider in ("elevenlabs", "gemini_lyra"):
+            with self.subTest(provider=provider):
+                self.assertEqual(effective_duration_sec(provider, 30, 90), 30)
+
+
+class ManagerJobPayloadTest(unittest.TestCase):
+    """The wiring: what the manager actually pushes onto Redis."""
+
+    ITEM = {"id": "item-1", "prompt": "calm piano", "target_duration_sec": 30}
+
+    def _payload(self, worker, hedge=False):
+        import manager
+        return json.loads(manager._job_payload(self.ITEM, worker, "job-1", hedge))
+
+    def test_job_for_the_mac_asks_for_at_least_90s(self):
+        self.assertGreaterEqual(self._payload("macbook_air")["target_duration_sec"], 90)
+
+    def test_job_for_dell_asks_for_at_least_90s(self):
+        self.assertGreaterEqual(self._payload("dell")["target_duration_sec"], 90)
+
+    def test_hedge_backup_to_a_local_worker_also_gets_the_floor(self):
+        self.assertGreaterEqual(self._payload("macbook_air", hedge=True)["target_duration_sec"], 90)
+
+    def test_job_for_a_paid_provider_is_unchanged(self):
+        self.assertEqual(self._payload("elevenlabs")["target_duration_sec"], 30)
+        self.assertEqual(self._payload("gemini_lyra")["target_duration_sec"], 30)
+
+    def test_a_raised_floor_is_honored(self):
+        import manager
+        old = manager.LOCAL_MIN_DURATION_SEC
+        manager.LOCAL_MIN_DURATION_SEC = 120.0
+        try:
+            self.assertEqual(self._payload("macbook_air")["target_duration_sec"], 120)
+        finally:
+            manager.LOCAL_MIN_DURATION_SEC = old
+
+    def test_the_job_still_passes_worker_side_validation(self):
+        # A floor the worker would reject would fail every local job.
+        import sys, os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "worker"))
+        from base import validate_request
+        job = self._payload("macbook_air")
+        validate_request(job["prompt"], job["target_duration_sec"])
+
+
 if __name__ == "__main__":
     unittest.main()
 

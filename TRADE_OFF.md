@@ -340,3 +340,39 @@ Ordered roughly by the day/area they were decided.
   never overwrite each other. Because the slug is restricted to `[a-z0-9-]`, a
   hostile prompt cannot introduce a path separator, a dotfile, or a name that
   collides on case-insensitive macOS.
+
+---
+
+## Track length (local workers)
+
+### Local workers produce at least 90s (`LOCAL_MIN_DURATION_SEC`); paid providers do not
+- **Chosen:** the queue manager raises every job it builds for a local worker
+  (MacBook, DELL, and a hedge backup to either) to at least
+  `LOCAL_MIN_DURATION_SEC` (default 90s). A longer request is kept. Paid
+  providers still get the item's own length (30s by default).
+- **Given up:**
+  1. **Throughput.** A longer track takes longer to generate. The Mac needed
+     ~95s for 30s of audio; 90s of audio should take on the order of 3x that
+     (this is an extrapolation, not a measurement). Generation can now be slower
+     than playback, so the live queue will back up under load and filler will
+     fill the gaps more often. Track-count per hour drops; minutes of music per
+     track rises.
+  2. **Uniform track length across sources.** In `hybrid` mode the length of a
+     song now depends on which source won the race: ~90s from a local worker,
+     ~30s from a paid one. Making paid tracks match would cost more per track
+     (ElevenLabs bills by length) and the Gemini clip model cannot exceed 30s,
+     so it was left as-is.
+  3. **`SAFETY_MARGIN_SEC` is now mis-sized.** Its 120s default was chosen as
+     "a bit longer than one Mac generation of a 30s clip". A 90s generation is
+     longer than 120s, so the hedge window is shorter than one generation.
+     Retune it from measured `generation_stats` (Day 18 soak). Left unchanged
+     deliberately rather than guessed.
+  4. **`queue_items.target_duration_sec` still records 30.** The floor is applied
+     when the job is built, so the stored nominal value no longer equals what the
+     worker was asked for; the real value is in the `item_assigned` log and the
+     job payload. Deadline math falls back to the local floor (90s) because no
+     measured durations are recorded yet.
+- **Why at the manager:** one place covers the Mac, the DELL and hedge backups,
+  and the setting lives in the master's `.env`, not on each worker machine. A
+  bad value (outside 5-300s, the worker's own validation range) stops the manager
+  at startup instead of making every local job fail.

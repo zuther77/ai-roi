@@ -29,7 +29,10 @@ from timing import (
     PROVIDERS,
     ROLLING_WINDOW,
     SAFETY_MARGIN_SEC,
+    DEFAULT_LOCAL_MIN_DURATION_SEC,
     configured_providers,
+    effective_duration_sec,
+    parse_local_min_duration,
     plan_assignment,
     provider_health_from,
     require_paid_only_config,
@@ -50,6 +53,10 @@ STATS_DB = os.environ.get("STATS_DB", "/app/queue/generation_stats.db")
 MODE = resolve_mode(os.environ.get("GENERATION_MODE"), configured_providers(os.environ))
 CONFIGURED_PROVIDERS = configured_providers(os.environ)
 SAFETY_MARGIN = float(os.environ.get("SAFETY_MARGIN_SEC", str(SAFETY_MARGIN_SEC)))
+# Minimum music per track for LOCAL workers (owner request). Validated in
+# main(): a bad value stops the manager with a clear error instead of making
+# every local job fail validation at the worker.
+LOCAL_MIN_DURATION_SEC = DEFAULT_LOCAL_MIN_DURATION_SEC
 
 
 def log(event: str, **fields) -> None:
@@ -129,7 +136,8 @@ def _job_payload(item: dict, worker: str, job_id: str, hedge: bool) -> str:
         "job_id": job_id,
         "queue_item_id": item["id"],
         "prompt": item["prompt"],
-        "target_duration_sec": item["target_duration_sec"],
+        "target_duration_sec": effective_duration_sec(
+            worker, item["target_duration_sec"], LOCAL_MIN_DURATION_SEC),
         "priority": "live",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "worker": worker,
@@ -293,7 +301,9 @@ def dispatch_one(store, r: MiniRedis, now: datetime | None = None) -> bool:
     depth = store.open_depth()
     avg_track = store.average_track_sec()
     if avg_track is None:
-        avg_track = FALLBACK_AVG_TRACK_SEC
+        # No measured durations are recorded yet, so this fallback drives the
+        # deadline math. Local workers now make LOCAL_MIN_DURATION_SEC tracks.
+        avg_track = max(FALLBACK_AVG_TRACK_SEC, LOCAL_MIN_DURATION_SEC)
     phealth = provider_health_from(
         MODE, provider_heartbeats(r), CONFIGURED_PROVIDERS)
     plan = plan_assignment(
@@ -332,7 +342,9 @@ def dispatch_one(store, r: MiniRedis, now: datetime | None = None) -> bool:
     payload = _job_payload(item, plan.worker, job_id, hedge=False)
     push_job(r, plan.worker, payload)
     log("item_assigned", queue_item_id=item["id"], worker=plan.worker,
-        job_id=job_id, prompt=item["prompt"][:120])
+        job_id=job_id, prompt=item["prompt"][:120],
+        target_duration_sec=effective_duration_sec(
+            plan.worker, item["target_duration_sec"], LOCAL_MIN_DURATION_SEC))
     if plan.hedge_worker and plan.start_hedge_after_sec is not None:
         remember_hedge(r, item["id"], {
             "primary_job_id": job_id,
@@ -357,11 +369,15 @@ def main() -> int:
         return 2
     try:
         require_paid_only_config(MODE, CONFIGURED_PROVIDERS)
+        global LOCAL_MIN_DURATION_SEC
+        LOCAL_MIN_DURATION_SEC = parse_local_min_duration(
+            os.environ.get("LOCAL_MIN_DURATION_SEC"))
     except Exception as exc:
         log("manager_start_error", reason=str(exc))
         return 3
     store = connect(url)
     log("manager_start", tracks_dir=TRACKS_DIR, mode=MODE,
+        local_min_duration_sec=LOCAL_MIN_DURATION_SEC,
         configured_providers=CONFIGURED_PROVIDERS,
         safety_margin_sec=SAFETY_MARGIN, stats_db=STATS_DB)
     redis = None

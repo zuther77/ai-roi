@@ -397,7 +397,9 @@ with zero external dependencies, `hybrid`/`paid_only` are available and
 genuinely optional, and graceful degradation is validated — not just designed
 — under combined real-world failure conditions. DELL stays parked.
 
-Day 16 is implemented (owner-verification pending): YouTube Live Chat as the
+Day 16 is owner-verified for chat intake (2026-10-21, live stream); the optional
+chat REPLIES are implemented but not yet manually tested (owner will circle back).
+Day 16 is implemented: YouTube Live Chat as the
 PUBLIC prompt path. Owner decision 2026-10-20 (option 2): chat is public, the
 Day 10 web form stays as an operator tool published on localhost only
 (`INTAKE_BIND`, default 127.0.0.1; design-spec §3.1 and TRADE_OFF.md updated).
@@ -423,12 +425,21 @@ Day 10 web form stays as an operator tool published on localhost only
     the refresh token after 7 days.
   * The first poll's chat history is discarded so a restart never re-submits old
     requests (cost: requests typed while the bot is down are not replayed).
-  * 219 tests repo-wide. DELL stays parked.
+  * 219 tests repo-wide at that point. DELL stays parked.
 
 Owner must run the live check against a real stream (see the Day 16
 verification steps): `!request` in chat is moderated and aired; a non-command
 message is ignored; a rejected request is logged; the form is unreachable from
 another machine. An agent cannot do this — it needs a live broadcast + API key.
+
+---
+
+Post-Day-16 changes (owner requests): generated tracks are named
+`<prompt-slug>-<jobid8>.<ext>` (`base.track_stem`); local workers now produce
+AT LEAST `LOCAL_MIN_DURATION_SEC` (default 90s) — the queue manager raises every
+local job to that floor, paid providers keep the item's own length. Longer
+tracks take longer to generate, `SAFETY_MARGIN_SEC=120` is now shorter than one
+generation and should be re-measured and retuned (see TRADE_OFF.md "Track length").
 
 ---
 
