@@ -399,6 +399,9 @@ genuinely optional, and graceful degradation is validated — not just designed
 
 Day 16 is owner-verified for chat intake (2026-10-21, live stream); the optional
 chat REPLIES are implemented but not yet manually tested (owner will circle back).
+The post-Day-16 changes below (prompt-named tracks, 90s+ local tracks, live ElevenLabs
+balance, hybrid overflow to a provider when local is busy, 3-minute provider tracks)
+were owner-tested on 2026-10-22.
 Day 16 is implemented: YouTube Live Chat as the
 PUBLIC prompt path. Owner decision 2026-10-20 (option 2): chat is public, the
 Day 10 web form stays as an operator tool published on localhost only
