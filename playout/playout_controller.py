@@ -484,6 +484,10 @@ def play_tailable(pool: FillerPool, store) -> int:
         "AUDIO_FILE": "",
     }
     proc = subprocess.Popen([str(STREAM_SCRIPT)], env=env)
+    # The status dashboard derives stream uptime ("time since FFmpeg last
+    # started") and restart count from this event, so it must be logged every
+    # time a new FFmpeg process is launched.
+    log_event(logging.INFO, "ffmpeg_started", "ffmpeg launched (live PCM fifo session)")
     code = 1
     fifo_fd = None
     try:

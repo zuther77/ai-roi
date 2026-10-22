@@ -196,6 +196,36 @@ services:
       - postgres
       - redis
 
+  # Day 17 — status dashboard. READ-ONLY: it only reads Postgres, Redis, the
+  # stats db, the playout log and the filler/tracks dirs, and writes nothing.
+  # NO AUTHENTICATION, so it is published on LOCALHOST ONLY by default
+  # (STATUS_BIND); set it to the master's LAN address only on a network you
+  # trust. Open http://127.0.0.1:8081 ON the master. It is an operator
+  # convenience, not part of the stream: if it dies, nothing else is affected.
+  status:
+    build: ./queue
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-radio}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-radio}
+      REDIS_URL: redis://redis:6379/0
+      STATUS_PORT: "8081"
+      STATS_DB: /app/queue/generation_stats.db
+      PLAYOUT_LOG: /app/logs/playout.jsonl
+      FILLER_DIR: /app/filler-pool
+      TRACKS_DIR: /srv/radio/tracks
+    ports:
+      - "${STATUS_BIND:-127.0.0.1}:8081:8081"
+    volumes:
+      - ./queue:/app/queue:ro
+      - ./logs:/app/logs:ro
+      - ./filler-pool:/app/filler-pool:ro
+      - ${TRACKS_HOST_DIR:-./tracks}:/srv/radio/tracks:ro
+    command: ["python", "-u", "/app/queue/status.py"]
+    restart: always
+    depends_on:
+      - postgres
+      - redis
+
   # Day 10 — operator prompt form. Same image as the queue manager. Serves the
   # page and POST /prompts. Does not generate.
   # Day 16: this is an operator/testing tool, NOT the public path (that is

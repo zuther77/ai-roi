@@ -29,6 +29,7 @@ sys.path.insert(0, str(ROOT / "worker"))
 
 from macbook_worker import MacBookWorker  # noqa: E402
 from reaper import MiniRedis  # noqa: E402
+from telemetry import Cached, mac_thermal  # noqa: E402
 
 PENDING_KEY = os.environ.get("JOBS_PENDING_KEY", "jobs:pending:macbook_air")
 IN_PROGRESS_KEY = "jobs:in_progress"
@@ -47,16 +48,19 @@ def log(event: str, **fields) -> None:
 
 
 def start_heartbeat(url: str, password: str, busy: dict) -> None:
+    thermal = Cached(mac_thermal, ttl=30.0)  # a subprocess: keep it off the 5s path
+
     def loop() -> None:
         conn = None
         while True:
             try:
                 if conn is None:
                     conn = MiniRedis(url, password)
-                conn.command(
-                    "SETEX", f"worker:{WORKER}", "20",
-                    json.dumps({"busy": bool(busy["v"])}),
-                )
+                beat = {"busy": bool(busy["v"])}
+                state = thermal.get()
+                if state:
+                    beat["thermal"] = state  # shown on the status dashboard
+                conn.command("SETEX", f"worker:{WORKER}", "20", json.dumps(beat))
             except Exception:
                 conn = None
             time.sleep(HEARTBEAT_SEC)

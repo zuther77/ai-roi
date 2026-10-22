@@ -444,6 +444,21 @@ local job to that floor, paid providers keep the item's own length. Longer
 tracks take longer to generate, `SAFETY_MARGIN_SEC=120` is now shorter than one
 generation and should be re-measured and retuned (see TRADE_OFF.md "Track length").
 
+Day 17 is implemented (owner-verification pending): a status dashboard.
+`queue/status.py` serves `/status` (JSON) and an auto-refreshing page at
+http://127.0.0.1:8081 (Compose service `status`, localhost-only, READ-ONLY, no auth).
+Sections: queue depth, mode, per-worker health/latency/failure rate/temperature,
+per-provider health/credits/latency, stream uptime, hourly moderation reject rate,
+filler pool + tracks disk. Each section degrades on its own (a dead Redis shows an
+error in that block, the rest still render); responses are cached 3s.
+Needed supporting changes: playout logs a new `ffmpeg_started` event (stream uptime
+reads `unknown` until playout is rebuilt/restarted), and the worker heartbeats
+carry optional `thermal` (Mac) / `temperature_c` (DELL) via `worker/telemetry.py`.
+Numbers worth cross-checking by hand before trusting them: queue depth vs a
+`SELECT COUNT(*)`, reject rate vs the `prompts` table. See TRADE_OFF.md "Status
+dashboard (Day 17)" for what each figure does and does not mean. 249 queue + 83
+worker + 9 playout tests. DELL stays parked.
+
 ---
 
 ## 9. Practical reference

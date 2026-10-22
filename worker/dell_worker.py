@@ -58,6 +58,7 @@ from datetime import datetime, timezone
 
 from ace_client import AceStepClient, extract_audio_path
 from base import track_stem
+from telemetry import Cached, gpu_temperature_c
 from urllib.parse import unquote, urlparse
 
 # Day 8: the queue manager pushes onto a per-worker list. Override only
@@ -209,16 +210,19 @@ def start_heartbeat(url: str, password: str) -> None:
     """Tell the queue manager this process is up. Own socket: the claim
     connection blocks inside BRPOPLPUSH and cannot share a client."""
 
+    gpu_temp = Cached(gpu_temperature_c, ttl=30.0)  # a subprocess: off the 5s path
+
     def loop() -> None:
         conn = None
         while True:
             try:
                 if conn is None:
                     conn = MiniRedis(url, password)
-                conn.command(
-                    "SETEX", "worker:dell", "20",
-                    json.dumps({"busy": bool(_busy["v"])}),
-                )
+                beat = {"busy": bool(_busy["v"])}
+                temp = gpu_temp.get()
+                if temp is not None:
+                    beat["temperature_c"] = temp  # shown on the status dashboard
+                conn.command("SETEX", "worker:dell", "20", json.dumps(beat))
             except Exception:
                 conn = None
             time.sleep(5)

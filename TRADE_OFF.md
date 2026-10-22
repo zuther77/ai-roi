@@ -435,3 +435,53 @@ Ordered roughly by the day/area they were decided.
   item, i.e. a paid ElevenLabs generation running in parallel with almost every
   local one. That is a cost decision, not a bug fix, so it is left alone until
   the owner chooses.
+
+---
+
+## Status dashboard (Day 17)
+
+### A read-only, unauthenticated dashboard on localhost only
+- **Chosen:** `queue/status.py` (`/status` JSON + an auto-refreshing page), published
+  on `127.0.0.1:8081` (`STATUS_BIND`). It only reads; it never writes to Postgres,
+  Redis, or any volume (mounts are `:ro`).
+- **Given up:** (1) **remote viewing without SSH or a tunnel** - it has no
+  authentication, so exposing it to a LAN means anyone on it can see queue depth,
+  worker state, credit balance and reject rate (never prompt text or keys, which are
+  excluded by test); open it on the master or tunnel in; (2) **history** - it shows
+  the current state only, no trends or graphs (the spec's "trend" is not built).
+- **Why:** an operations page is the thing most likely to be left open on a shared
+  network; unauthenticated + localhost-only is the safe default, and a deployer can
+  widen it knowingly.
+
+### Responses are cached 3 seconds
+- **Chosen:** one recompute per `STATUS_CACHE_SEC`, shared by every viewer.
+- **Given up:** sub-3-second freshness. A worker that dies shows as down within one
+  heartbeat TTL (~20s) plus up to 3s of cache plus the page's 5s refresh.
+- **Why:** the plan's pitfall - the dashboard must never become load on the system.
+
+### Failure rate comes from the queue table, not generation_stats
+- **Chosen:** per-source failure rate = `failed / (ready+playing+played+failed)` over
+  24h from `queue_items`.
+- **Why:** `generation_stats` only receives rows for SUCCESSFUL jobs (workers push a
+  stats row after a job completes), so a rate computed from it would read 0% forever.
+- **Given up:** it counts items by their primary source; a hedge backup that failed
+  while the primary succeeded is not counted.
+
+### Stream uptime = time since FFmpeg last started, from a new log event
+- **Chosen:** playout now logs `ffmpeg_started` when it launches FFmpeg; the dashboard
+  reads the latest one from the tail of `playout.jsonl`.
+- **Given up:** (1) it reads `unknown` until playout is rebuilt/restarted with this
+  change; (2) it is process uptime, NOT proof that YouTube is receiving data - FFmpeg
+  can be running while ingest is down; (3) restart count only covers the log tail
+  (the file rotates at 5 MB) and counts container restarts too.
+
+### Temperatures are reported by the workers, best-effort
+- **Chosen:** the Mac heartbeat carries `thermal` (from `pmset -g therm`) and the DELL
+  heartbeat `temperature_c` (from `nvidia-smi`); both are cached 30s and silently absent
+  if the tool is missing.
+- **Given up / unverified:** the Mac parser was run against this machine's real
+  all-clear output, but the "throttled" format is assumed from Apple's documentation;
+  the DELL reader is parsed against sample `nvidia-smi` output only (DELL is parked, and
+  the slim worker container may not have `nvidia-smi` at all).
+- **Not built:** disk usage is shown for the tracks volume only; the spec's per-GPU
+  alerting thresholds are not implemented.
