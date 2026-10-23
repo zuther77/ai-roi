@@ -1,12 +1,12 @@
-"""MacBook queue claimer: a native process, never a container.
+"""Mac queue claimer: a native process, never a container.
 
 The ACE-Step server is already running (start_api_server_macos.sh). This
-claims jobs the queue manager pushed onto jobs:pending:macbook_air, generates
-through MacBookWorker, and writes the file onto the NFS mount the setup guide
+claims jobs the queue manager pushed onto jobs:pending:mac, generates
+through MacWorker, and writes the file onto the NFS mount the setup guide
 attached at /Volumes/radio-tracks.
 
     cd /path/to/ai-roi
-    PYTHONUNBUFFERED=1 python3 worker/macbook_claim.py
+    PYTHONUNBUFFERED=1 python3 worker/mac_claim.py
 
 REDIS_URL and REDIS_PASSWORD come from the environment (same values as .env).
 """
@@ -22,7 +22,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-os.environ.setdefault("MACBOOK_OUTPUT_DIR", "/Volumes/radio-tracks")
+os.environ.setdefault("MAC_OUTPUT_DIR", "/Volumes/radio-tracks")
 
 # Run from the repo root with the system python: the flat module layout the
 # containers get from their working dir has to be reproduced by hand here.
@@ -30,12 +30,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "queue"))
 sys.path.insert(0, str(ROOT / "worker"))
 
-from macbook_worker import MacBookWorker  # noqa: E402
+from mac_worker import MacWorker  # noqa: E402
 from reaper import MiniRedis  # noqa: E402
 from telemetry import Cached, mac_thermal  # noqa: E402
 
-WORKER = "macbook_air"
-PENDING_KEY = os.environ.get("JOBS_PENDING_KEY", "jobs:pending:macbook_air")
+WORKER = "mac"
+PENDING_KEY = os.environ.get("JOBS_PENDING_KEY", "jobs:pending:mac")
 IN_PROGRESS_KEY = "jobs:in_progress"
 COMPLETED_KEY = "jobs:completed"
 STATS_KEY = "generation:stats"
@@ -97,7 +97,7 @@ def _release(r, raw: str, job_id: str) -> None:
     r.command("DEL", LEASE_PREFIX + job_id)
 
 
-def handle_job(r, worker: MacBookWorker, raw: str, busy: dict) -> None:
+def handle_job(r, worker: MacWorker, raw: str, busy: dict) -> None:
     """Claim -> generate -> complete for one job."""
     try:
         job = json.loads(raw)
@@ -150,9 +150,9 @@ def main() -> int:
 
     busy = {"v": False}
     start_heartbeat(url, password, busy)
-    worker = MacBookWorker()
+    worker = MacWorker()
     worker.ensure_server()
-    log("worker_ready", pending=PENDING_KEY, output=os.environ["MACBOOK_OUTPUT_DIR"])
+    log("worker_ready", pending=PENDING_KEY, output=os.environ["MAC_OUTPUT_DIR"])
 
     redis = None
     while True:

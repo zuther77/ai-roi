@@ -1,7 +1,7 @@
 """Minimal RESP2 Redis client shared by the worker scripts.
 
 Stdlib only by necessity: the worker containers get no `pip install`
-(provider-worker runs on a bare python:3.12-slim) and macbook_claim.py runs on
+(provider-worker runs on a bare python:3.12-slim) and mac_claim.py runs on
 the Mac's system python, so a real redis package is not available for the
 handful of commands these scripts issue.
 """

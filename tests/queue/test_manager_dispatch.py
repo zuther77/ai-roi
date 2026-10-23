@@ -70,22 +70,22 @@ class DispatchTest(unittest.TestCase):
         return dict(self.store._one("SELECT status, source_assigned FROM queue_items"))
 
     def test_chat_queued_item_reaches_the_mac_with_at_least_90s(self):
-        alive(self.r, "macbook_air")
+        alive(self.r, "mac")
         self.store.enqueue("calm piano ambient", source="youtube_chat")
         self.assertTrue(manager.dispatch_one(self.store, self.r))
-        jobs = self.r.jobs("macbook_air")
+        jobs = self.r.jobs("mac")
         self.assertEqual(len(jobs), 1)
         self.assertEqual(jobs[0]["prompt"], "calm piano ambient")
         self.assertGreaterEqual(jobs[0]["target_duration_sec"], 90)
-        self.assertEqual(self.row(), {"status": "generating", "source_assigned": "macbook_air"})
+        self.assertEqual(self.row(), {"status": "generating", "source_assigned": "mac"})
 
     def test_web_and_chat_items_are_dispatched_identically(self):
-        alive(self.r, "macbook_air")
+        alive(self.r, "mac")
         self.store.enqueue("from the form", source="web")
         self.store.enqueue("from chat", source="youtube_chat")
         manager.dispatch_one(self.store, self.r)
         manager.dispatch_one(self.store, self.r)
-        self.assertEqual([j["prompt"] for j in self.r.jobs("macbook_air")],
+        self.assertEqual([j["prompt"] for j in self.r.jobs("mac")],
                          ["from the form", "from chat"])
 
     def test_no_live_worker_leaves_the_item_queued_not_lost(self):
@@ -95,15 +95,15 @@ class DispatchTest(unittest.TestCase):
         self.assertFalse(manager.dispatch_one(self.store, self.r))
         self.assertEqual(self.r.lists, {})
         self.assertEqual(self.row()["status"], "queued")
-        alive(self.r, "macbook_air")
+        alive(self.r, "mac")
         self.assertTrue(manager.dispatch_one(self.store, self.r))
-        self.assertEqual(len(self.r.jobs("macbook_air")), 1)
+        self.assertEqual(len(self.r.jobs("mac")), 1)
 
     def test_a_busy_mac_still_gets_the_job_queued_behind_its_current_one(self):
-        alive(self.r, "macbook_air", busy=True)
+        alive(self.r, "mac", busy=True)
         self.store.enqueue("queued behind a running job", source="youtube_chat")
         self.assertTrue(manager.dispatch_one(self.store, self.r))
-        self.assertEqual(len(self.r.jobs("macbook_air")), 1)
+        self.assertEqual(len(self.r.jobs("mac")), 1)
 
     def test_a_stuck_head_item_blocks_the_ones_behind_it(self):
         # Documents current behavior: dispatch only ever looks at the OLDEST
@@ -111,9 +111,9 @@ class DispatchTest(unittest.TestCase):
         self.store.enqueue("old item", source="web")
         self.store.enqueue("newer chat item", source="youtube_chat")
         self.assertFalse(manager.dispatch_one(self.store, self.r))
-        alive(self.r, "macbook_air")
+        alive(self.r, "mac")
         manager.dispatch_one(self.store, self.r)
-        self.assertEqual([j["prompt"] for j in self.r.jobs("macbook_air")], ["old item"])
+        self.assertEqual([j["prompt"] for j in self.r.jobs("mac")], ["old item"])
 
 
 def eleven_alive(r, quota):
@@ -127,7 +127,7 @@ class PaidOnlyElevenLabsTest(unittest.TestCase):
         self.store, self.r = memory_store(), FakeRedis()
         self._saved = (manager.MODE, manager.CONFIGURED_PROVIDERS)
         manager.MODE, manager.CONFIGURED_PROVIDERS = "paid_only", ["elevenlabs"]
-        alive(self.r, "macbook_air")  # a healthy Mac must still NOT be used
+        alive(self.r, "mac")  # a healthy Mac must still NOT be used
 
     def tearDown(self):
         manager.MODE, manager.CONFIGURED_PROVIDERS = self._saved
@@ -137,7 +137,7 @@ class PaidOnlyElevenLabsTest(unittest.TestCase):
         self.store.enqueue("calm piano", source="youtube_chat")
         self.assertTrue(manager.dispatch_one(self.store, self.r))
         self.assertEqual(len(self.r.jobs("elevenlabs")), 1)
-        self.assertEqual(self.r.jobs("macbook_air"), [])
+        self.assertEqual(self.r.jobs("mac"), [])
         # paid providers now get their own 3-minute length (PROVIDER_DURATION_SEC)
         self.assertEqual(self.r.jobs("elevenlabs")[0]["target_duration_sec"], 180)
 
@@ -223,79 +223,79 @@ class HybridOverflowTest(unittest.TestCase):
         return manager.dispatch_one(self.store, self.r)
 
     def test_idle_mac_takes_the_item(self):
-        alive(self.r, "macbook_air")
+        alive(self.r, "mac")
         self.assertTrue(self.dispatch("first"))
-        self.assertEqual(len(self.r.jobs("macbook_air")), 1)
+        self.assertEqual(len(self.r.jobs("mac")), 1)
         self.assertEqual(self.r.jobs("elevenlabs"), [])
 
     def test_busy_mac_overflows_to_elevenlabs_not_the_mac_queue(self):
-        alive(self.r, "macbook_air", busy=True)            # heartbeat says busy
+        alive(self.r, "mac", busy=True)            # heartbeat says busy
         self.assertTrue(self.dispatch("second"))
-        self.assertEqual(self.r.jobs("macbook_air"), [])    # NOT queued behind the Mac
+        self.assertEqual(self.r.jobs("mac"), [])    # NOT queued behind the Mac
         self.assertEqual(len(self.r.jobs("elevenlabs")), 1)
 
     def test_replay_of_the_logged_sequence(self):
         # 22:18:22 idle Mac -> Mac.  22:18:40 and 22:19:10 Mac busy -> ElevenLabs.
-        alive(self.r, "macbook_air")
+        alive(self.r, "mac")
         self.dispatch("a73b738e piano ballad")
         # the Mac claims it: it leaves the pending list and shows as busy
-        self.r.lists["jobs:pending:macbook_air"].clear()
-        alive(self.r, "macbook_air", busy=True)
-        self.r.lists["jobs:in_progress"] = [json.dumps({"job_id": "j1", "worker": "macbook_air"})]
+        self.r.lists["jobs:pending:mac"].clear()
+        alive(self.r, "mac", busy=True)
+        self.r.lists["jobs:in_progress"] = [json.dumps({"job_id": "j1", "worker": "mac"})]
         self.dispatch("1efbc3c4 trap beat")
         self.dispatch("67c2043c outlaw country")
-        self.assertEqual([j["prompt"][:8] for j in self.r.jobs("macbook_air")], [])
+        self.assertEqual([j["prompt"][:8] for j in self.r.jobs("mac")], [])
         self.assertEqual([j["prompt"][:8] for j in self.r.jobs("elevenlabs")],
                          ["1efbc3c4", "67c2043c"])
 
     def test_heartbeat_lag_does_not_send_a_second_item_to_the_mac(self):
         # The Mac's heartbeat still says idle (it updates every 5s), but the
         # manager already pushed it a job. The second item must overflow.
-        alive(self.r, "macbook_air", busy=False)
+        alive(self.r, "mac", busy=False)
         self.dispatch("first")
-        self.assertEqual(len(self.r.jobs("macbook_air")), 1)
+        self.assertEqual(len(self.r.jobs("mac")), 1)
         self.dispatch("second, 2s later, heartbeat not updated yet")
-        self.assertEqual(len(self.r.jobs("macbook_air")), 1)
+        self.assertEqual(len(self.r.jobs("mac")), 1)
         self.assertEqual(len(self.r.jobs("elevenlabs")), 1)
 
     def test_a_claimed_job_still_counts_before_the_heartbeat_catches_up(self):
-        alive(self.r, "macbook_air", busy=False)
-        self.r.lists["jobs:in_progress"] = [json.dumps({"job_id": "j1", "worker": "macbook_air"})]
+        alive(self.r, "mac", busy=False)
+        self.r.lists["jobs:in_progress"] = [json.dumps({"job_id": "j1", "worker": "mac"})]
         self.dispatch("arrives mid-generation")
-        self.assertEqual(self.r.jobs("macbook_air"), [])
+        self.assertEqual(self.r.jobs("mac"), [])
         self.assertEqual(len(self.r.jobs("elevenlabs")), 1)
 
     def test_other_workers_jobs_do_not_make_the_mac_look_busy(self):
-        alive(self.r, "macbook_air")
+        alive(self.r, "mac")
         self.r.lists["jobs:in_progress"] = [json.dumps({"job_id": "j9", "worker": "elevenlabs"})]
         self.dispatch("x")
-        self.assertEqual(len(self.r.jobs("macbook_air")), 1)
+        self.assertEqual(len(self.r.jobs("mac")), 1)
 
     def test_busy_mac_and_no_provider_queues_behind_the_mac(self):
         # Filler only happens when the provider is unavailable AND local is busy.
         self.r.kv.pop("worker:elevenlabs")
-        alive(self.r, "macbook_air", busy=True)
+        alive(self.r, "mac", busy=True)
         self.assertTrue(self.dispatch("waits for the mac"))
-        self.assertEqual(len(self.r.jobs("macbook_air")), 1)
+        self.assertEqual(len(self.r.jobs("mac")), 1)
 
     def test_busy_mac_and_exhausted_provider_queues_behind_the_mac(self):
         eleven_alive(self.r, 0)
-        alive(self.r, "macbook_air", busy=True)
+        alive(self.r, "mac", busy=True)
         self.dispatch("x")
-        self.assertEqual(len(self.r.jobs("macbook_air")), 1)
+        self.assertEqual(len(self.r.jobs("mac")), 1)
         self.assertEqual(self.r.jobs("elevenlabs"), [])
 
     def test_busy_mac_and_unknown_balance_queues_behind_the_mac(self):
         eleven_alive(self.r, None)   # unknown counts as exhausted (spec 5.3)
-        alive(self.r, "macbook_air", busy=True)
+        alive(self.r, "mac", busy=True)
         self.dispatch("x")
-        self.assertEqual(len(self.r.jobs("macbook_air")), 1)
+        self.assertEqual(len(self.r.jobs("mac")), 1)
 
     def test_local_only_never_overflows_even_with_a_healthy_provider(self):
         manager.MODE = "local_only"
-        alive(self.r, "macbook_air", busy=True)
+        alive(self.r, "mac", busy=True)
         self.dispatch("x")
-        self.assertEqual(len(self.r.jobs("macbook_air")), 1)
+        self.assertEqual(len(self.r.jobs("mac")), 1)
         self.assertEqual(self.r.jobs("elevenlabs"), [])
 
 
@@ -310,16 +310,16 @@ class ProviderLengthTest(unittest.TestCase):
         manager.MODE, manager.CONFIGURED_PROVIDERS = self._saved
 
     def test_elevenlabs_jobs_ask_for_3_minutes(self):
-        alive(self.r, "macbook_air", busy=True)
+        alive(self.r, "mac", busy=True)
         self.store.enqueue("calm piano", source="youtube_chat")   # item asks 30s
         manager.dispatch_one(self.store, self.r)
         self.assertEqual(self.r.jobs("elevenlabs")[0]["target_duration_sec"], 180)
 
     def test_local_jobs_keep_their_own_floor(self):
-        alive(self.r, "macbook_air")
+        alive(self.r, "mac")
         self.store.enqueue("calm piano", source="youtube_chat")
         manager.dispatch_one(self.store, self.r)
-        self.assertGreaterEqual(self.r.jobs("macbook_air")[0]["target_duration_sec"], 90)
+        self.assertGreaterEqual(self.r.jobs("mac")[0]["target_duration_sec"], 90)
 
     def test_a_180s_job_passes_provider_side_validation(self):
         from base import validate_request
@@ -328,8 +328,8 @@ class ProviderLengthTest(unittest.TestCase):
 
 class RouteReasonTest(unittest.TestCase):
     def wh(self, ok=True, busy=False):
-        return {"dell": {"ok": False, "busy": False},
-                "macbook_air": {"ok": ok, "busy": busy}}
+        return {"windows": {"ok": False, "busy": False},
+                "mac": {"ok": ok, "busy": busy}}
 
     def test_overflow_is_named(self):
         self.assertEqual(manager.route_reason("hybrid", "elevenlabs", self.wh(busy=True)),
@@ -337,11 +337,11 @@ class RouteReasonTest(unittest.TestCase):
 
     def test_queued_behind_busy_local_is_named(self):
         self.assertIn("queued behind",
-                      manager.route_reason("hybrid", "macbook_air",
+                      manager.route_reason("hybrid", "mac",
                                            self.wh(busy=True)))
 
     def test_idle_local(self):
-        self.assertEqual(manager.route_reason("hybrid", "macbook_air", self.wh()),
+        self.assertEqual(manager.route_reason("hybrid", "mac", self.wh()),
                          "local worker idle")
 
     def test_no_local_provider(self):

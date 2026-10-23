@@ -16,5 +16,5 @@ Docker, no API keys, no real generation.
 import production modules exactly as the containers do.
 
 Operator scripts that make real calls are **not** tests and are not here; they
-live beside the code they exercise (`worker/acceptance_macbook.py`,
+live beside the code they exercise (`worker/acceptance_mac.py`,
 `worker/try_elevenlabs.py`, `queue/chaos_test.py`).

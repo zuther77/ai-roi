@@ -47,7 +47,7 @@ from timing import (
     resolve_mode,
 )
 
-WORKERS = ("dell", "macbook_air")
+WORKERS = ("windows", "mac")
 HEARTBEAT_TTL_SEC = 20          # workers SETEX worker:<name> with this TTL
 ROLLING_WINDOW = 20
 
@@ -388,7 +388,7 @@ def collect_workers(r, latency: dict, failures: dict) -> dict:
             "avg_latency_sec": lat.get("avg_sec"),
             "latency_samples": lat.get("samples", 0),
             "failure_rate_24h": fail.get("rate"),
-            # Reported by the worker itself: GPU temp (DELL), thermal (MacBook).
+            # Reported by the worker itself: GPU temp (Windows), thermal (Mac).
             "temperature_c": view["detail"].get("temperature_c"),
             "thermal": view["detail"].get("thermal"),
         }

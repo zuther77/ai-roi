@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 # Order is the tie-break when nothing has been assigned yet.
-CANONICAL = ("dell", "macbook_air")
+CANONICAL = ("windows", "mac")
 
 
 @dataclass(frozen=True)

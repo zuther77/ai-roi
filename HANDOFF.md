@@ -5,38 +5,41 @@ the two design documents in the section below.
 
 **PROJECT MARKED COMPLETE 2026-10-07.** Days 1-17 built, Days 1-16
 owner-verified. Tests now live in `tests/` and run with `./run_tests.sh`.
-See **Section 10** for the current repo layout, the test runner, the
-deploy step per service, and what is still open. The dated history below
-is kept as-is for context.
+The two local workers were renamed to the role names **`mac`** and
+**`windows`** (from `macbook_air` / `dell`) — these strings are Redis keys
+and DB values, so an existing deployment needs the migration steps in
+Section 10. See **Section 10** for the current repo layout, the test
+runner, the deploy step per service, and what is still open. The dated
+history below is kept as-is for context.
 
 **Status as of 2026-09-22:** **Sprint 1 complete** (Days 1-3 + Option A
-gapless), verified on the MacBook **and re-verified on the Linux master** -
+gapless), verified on the Mac **and re-verified on the Linux master** -
 owner confirmed the live stream healthy after `docker compose up -d --build`.
 The master is now the Linux box. **Day 4 implemented** - Redis as a Compose
-service published only on `192.168.50.1:6379`, DELL worker skeleton
-(`worker/dell_worker.py`), master-side fake-job push
+service published only on `192.168.50.1:6379`, Windows worker skeleton
+(`worker/windows_worker.py`), master-side fake-job push
 (`worker/push_test_job.sh`). Master-side round-trip (push -> claim -> ack)
-machine-verified in Docker; **owner-verified on DELL 2026-09-22**
+machine-verified in Docker; **owner-verified on the Windows box 2026-09-22**
 (claim-exactly-once and kill-mid-claim orphan test both passed).
 **Day 5 complete** - real generation, containerized, owner-verified
-2026-09-24: real-prompt job claimed on DELL, generated, atomically
+2026-09-24: real-prompt job claimed on the Windows box, generated, atomically
 temp-then-renamed onto the master's NFS export, playable .wav verified on
 the master. Measured on the RTX 2060 (cpu_offload tier): **1365.55 s per
 30 s clip** - the Sprint 3 timing baseline. **Day 6 complete and owner-verified** (2026-10-03): all three deliberate
 failure tests (kill mid-generation, cable pull, disk-full) plus /health
-checks passed. **Sprint 2 closes**: DELL is a proven, failure-safe
-generation worker. **Day 7 complete (Mac), DELL parked**: the ACE-Step 1.5 migration
-(2026-10-04) holds; the MacBook is a working, owner-verified native
+checks passed. **Sprint 2 closes**: the Windows worker is a proven, failure-safe
+generation worker. **Day 7 complete (Mac), the Windows box parked**: the ACE-Step 1.5 migration
+(2026-10-04) holds; the Mac is a working, owner-verified native
 worker - 95.15 s per 30 s clip measured (MLX via their
-start_api_server_macos.sh; DELL is ~3x that speed when it works).
-**DELL is parked by owner decision** (2026-10-04): its 1.5 re-baseline
+start_api_server_macos.sh; the Windows box is ~3x that speed when it works).
+**The Windows box is parked by owner decision** (2026-10-04): its 1.5 re-baseline
 needs the <=6 GB VAE decode fix (ACESTEP_VAE_ON_CPU=1 +
 ACESTEP_VAE_DECODE_CHUNK_SIZE=512, in worker/README.md) but is deferred;
-we circle back later. **Day 8 owner-verified (2026-10-06)**: the MacBook claimed a job from
+we circle back later. **Day 8 owner-verified (2026-10-06)**: the Mac claimed a job from
 the master, wrote the file onto the master NFS export, and playout
 aired it on YouTube after the current filler song. One FFmpeg, no
 reconnect. **Day 9 owner-verified (2026-10-06)**: timing selection and hedging.
-Manual checks passed on the Linux master. **Day 10 owner-verified (2026-10-07)**: the prompt form enqueues and the song airs. DELL stays parked (no
+Manual checks passed on the Linux master. **Day 10 owner-verified (2026-10-07)**: the prompt form enqueues and the song airs. Windows stays parked (no
 heartbeat, so it is never chosen and never a hedge partner). Networking revision
 (2026-10-04, owner): the direct Ethernet link is RETIRED — every worker,
 any OS, connects over the regular LAN/Wi-Fi (spec v0.4.1). v0.4.2 (same
@@ -70,10 +73,10 @@ keeps broadcasting from its local filler pool.
 | Role | Machine | Notes |
 |------|---------|--------|
 | **Master** | **Linux** (production box) | From Sprint 2 onward. Docker Engine + Compose. Owns playout, Redis, NFS, Queue Manager. On the home LAN at **192.168.1.210** — the worker network (spec v0.4.1+v0.4.2, 2026-10-04: every worker, any OS, connects via LAN/Wi-Fi over plain DHCP; the old direct link `192.168.50.0/24` remains configured but optional). Same interface carries internet / YouTube RTMP. |
-| **Worker — DELL** | DELL laptop (RTX 2060) | Generation worker (1.5 re-baseline parked, fix in worker/README); connects via LAN/Wi-Fi like every worker (direct link retired 2026-10-04). |
-| **Worker / portable — MacBook** | MacBook Air M4 | No longer the master. Remains the Apple Silicon worker (native ACE-Step/MLX) on the home LAN later; can still be used to edit code and push to GitHub. |
+| **Worker — Windows** | Windows laptop (RTX 2060) | Generation worker (1.5 re-baseline parked, fix in worker/README); connects via LAN/Wi-Fi like every worker (direct link retired 2026-10-04). |
+| **Worker / portable — Mac** | Apple Silicon (M4 Air here) | No longer the master. Remains the Apple Silicon worker (native ACE-Step/MLX) on the home LAN later; can still be used to edit code and push to GitHub. |
 
-Sprint 1 was developed and verified with the MacBook as temporary master
+Sprint 1 was developed and verified with the Mac as temporary master
 (Docker Desktop). That was always the intended *dev* path in the spec; the
 owner is promoting Linux to master early so Sprint 2 does not fight Docker
 Desktop networking or macOS-as-NFS-server.
@@ -88,7 +91,7 @@ Desktop networking or macOS-as-NFS-server.
 3. `docker compose up -d --build` and confirm filler stream still reaches
    YouTube (Sprint 1 regression).
 4. Optional: enable `deploy/radio-stack.service` so compose starts on boot.
-5. ~~Cable master↔DELL; static IPs `192.168.50.1` / `.2`~~ — done in
+5. ~~Cable master↔Windows; static IPs `192.168.50.1` / `.2`~~ — done in
    Sprint 2 and verified; RETIRED by the 2026-10-04 networking decision
    (spec v0.4.1). See `worker/README.md` for the LAN/Wi-Fi worker setup,
    per OS.
@@ -140,7 +143,7 @@ These are the owner's explicit rules. They matter more than moving fast.
 3. **Pitfalls are known failure modes, not generic caveats.** If you hit one,
    say so explicitly instead of quietly working around it.
 4. **Everything runs in Docker / Docker Compose.** No native installs for the
-   app (except the Day 4 DELL worker *skeleton* script, which the plan allows
+   app (except the Day 4 Windows worker *skeleton* script, which the plan allows
    before containerizing). No case-sensitive-filesystem assumptions in code.
    Master runtime from Sprint 2 on is **Linux** (Docker Engine). macOS remains
    fine for editing/pushing; do not treat Docker Desktop as the Sprint 2
@@ -160,7 +163,7 @@ These are the owner's explicit rules. They matter more than moving fast.
 ## 4. Current state of the code
 
 Repo (Linux master clone path will differ): historically developed at
-`/Users/zuths/Desktop/Vibe/ai-roi/ai-roi` on the MacBook.
+`/Users/zuths/Desktop/Vibe/ai-roi/ai-roi` on the Mac.
 Remote: `https://github.com/zuther77/ai-roi` — **public**, `main` branch.
 
 ```
@@ -183,7 +186,7 @@ playout/
   playout_controller.py  builds playlist, one long-lived FFmpeg, repeats
   test_filler_pool.py    moved to tests/playout/ (9 stdlib unittest tests)
 worker/
-  dell_worker.py          Day 5 DELL worker: shared stdlib RESP2 client
+  windows_worker.py          Day 5 Windows worker: shared stdlib RESP2 client
                          (worker/redis_client.py) +
                          ACE-Step pipeline loaded once at startup, atomic
                          temp-write-then-rename onto NFS, measured timing,
@@ -192,7 +195,7 @@ worker/
                          pinned ACE-Step checkout; torch pinned to cu126
   push_test_job.sh        master-side fake-job push; redis-cli runs inside
                          the redis container, password never in argv
-  README.md               how to run on DELL; what is deliberately not here yet
+  README.md               how to run on Windows; what is deliberately not here yet
 test-assets/
   README.md              committed; image.jpg and track.mp3 are gitignored
 ```
@@ -263,9 +266,9 @@ accepted trade-off; Option B (FIFO) stays future work.
 
 ### Day 4 - complete, verified by the owner (2026-09-22)
 Redis as a Compose service published only on 192.168.50.1:6379 (requirepass,
-password via container env, never in argv). DELL worker skeleton (stdlib
+password via container env, never in argv). Windows worker skeleton (stdlib
 RESP2 client) with atomic BRPOPLPUSH claim and LREM ack. Owner-verified on
-DELL: claim-exactly-once; kill-mid-claim leaves the orphan in
+Windows worker: claim-exactly-once; kill-mid-claim leaves the orphan in
 jobs:in_progress and a restart never re-claims it.
 
 ### Day 5 - complete, verified by the owner (2026-09-24)
@@ -308,26 +311,25 @@ ACE-Step-1.5 clone); investigation confirmed 1.5 is an official, actively
 maintained successor repo with MLX on macOS, per-platform pinned deps
 (uv), and a VRAM tier table matching the spec verbatim. Changes:
 worker/ace_client.py (shared stdlib REST client: release_task ->
-query_result -> /v1/audio), dell_worker.py rewired onto it (slim worker
+query_result -> /v1/audio), windows_worker.py rewired onto it (slim worker
 image: python:3.12-slim + nfs-common + fastapi; the MODEL runs in a
 separate acestep15 container built from THEIR Dockerfile at ca1e85fe,
 ACESTEP_MODE=api, ACESTEP_CONFIG_PATH=acestep-v15-turbo, shared
 redis... no - shared ace-checkpoints volume + docker network
-radio-net), macbook_worker.py + acceptance_macbook.py (was
-test_macbook_worker.py) rewritten to the
+radio-net), mac_worker.py + acceptance_mac.py rewritten to the
 same client (the Mac keeps their start_api_server_macos.sh server, which
 owns MLX engagement). Leases/reaper/stats/health/base.py untouched
-(model-agnostic by design). Old DELL baselines (1365.55 s, 1400.3 s) are
+(model-agnostic by design). Old Windows baselines (1365.55 s, 1400.3 s) are
 VOID for the new engine; re-baseline before Day 8.
 
-### Day 7 - MacBook worker complete, owner-verified (2026-10-04); DELL parked
+### Day 7 - Mac worker complete, owner-verified (2026-10-04); Windows parked
 ACE-Step 1.5 migration (owner-directed): ace-step/ACE-Step @ 1bee4c9f ->
 ace-step/ACE-Step-1.5 @ ca1e85fe. Both workers now wrap ITS REST API
 server via worker/ace_client.py (stdlib, with embedded-URL unwrap fix);
 worker image slim (no torch); model config lives in the acestep15
 container; Mac runs their launcher natively (MLX). Mac results: malformed
 requests -> typed exceptions; real generation -> playable .mp3;
-**95.15 s per 30 s clip** (Day 8 timing data). DELL on 1.5: builds and
+**95.15 s per 30 s clip** (Day 8 timing data). The Windows box on 1.5: builds and
 serves, turbo diffusion ~2 s, but VAE decode hits a free-VRAM crisis
 (0.17 GB) -> CPU decode at chunk 128 stalls; grounded fix (their env
 knobs, in the runbook) documented but PARKED - owner will revisit.
@@ -386,7 +388,7 @@ exercise their hybrid/paid_only branches: local_only ignores healthy providers;
 hybrid prefers local but falls to a provider when both local workers are down
 (#33); paid_only routes ElevenLabs→Gemini→filler (#34, distinct from #33) and
 hedges ElevenLabs vs Gemini on a shallow queue; never touches a local worker.
-171 tests repo-wide at the time. DELL stays parked.
+171 tests repo-wide at the time. Windows stays parked.
 
 Day 15 is owner-verified (2026-10-20): combined-failure chaos testing across
 all three generation modes, per `DAY15_CHAOS_TESTING.md`'s checklist. All 11
@@ -403,7 +405,7 @@ internet-disconnect steps stayed manual per the plan (no software mitigation
 exists for #11 by design). Sprint 5 is closed: `local_only` works standalone
 with zero external dependencies, `hybrid`/`paid_only` are available and
 genuinely optional, and graceful degradation is validated — not just designed
-— under combined real-world failure conditions. DELL stays parked.
+— under combined real-world failure conditions. Windows stays parked.
 
 Day 16 is owner-verified for chat intake (2026-10-21, live stream); the optional
 chat REPLIES are implemented but not yet manually tested (owner will circle back).
@@ -436,7 +438,7 @@ Day 10 web form stays as an operator tool published on localhost only
     the refresh token after 7 days.
   * The first poll's chat history is discarded so a restart never re-submits old
     requests (cost: requests typed while the bot is down are not replayed).
-  * 219 tests repo-wide at that point. DELL stays parked.
+  * 219 tests repo-wide at that point. Windows stays parked.
 
 Owner must run the live check against a real stream (see the Day 16
 verification steps): `!request` in chat is moderated and aired; a non-command
@@ -461,11 +463,11 @@ filler pool + tracks disk. Each section degrades on its own (a dead Redis shows 
 error in that block, the rest still render); responses are cached 3s.
 Needed supporting changes: playout logs a new `ffmpeg_started` event (stream uptime
 reads `unknown` until playout is rebuilt/restarted), and the worker heartbeats
-carry optional `thermal` (Mac) / `temperature_c` (DELL) via `worker/telemetry.py`.
+carry optional `thermal` (Mac) / `temperature_c` (Windows) via `worker/telemetry.py`.
 Numbers worth cross-checking by hand before trusting them: queue depth vs a
 `SELECT COUNT(*)`, reject rate vs the `prompts` table. See TRADE_OFF.md "Status
 dashboard (Day 17)" for what each figure does and does not mean. 274 queue + 83
-worker + 9 playout tests. DELL stays parked.
+worker + 9 playout tests. Windows stays parked.
 DEPLOYING a dashboard change: `status` runs code from a bind mount, so `docker compose up -d
 --build status` does NOT restart it (Compose sees no config change) and the old version keeps
 serving. Use `docker compose restart status`. (playout bakes its code into the image, so it
@@ -526,7 +528,7 @@ entrypoint in `docker-compose.yml`.
 ```
 queue/     intake, submit, moderation, ratelimit, manager, selection, timing,
            reaper, store, status, chat_intake, chaos_test
-worker/    base, dell_worker, macbook_worker, macbook_claim, provider_worker,
+worker/    base, windows_worker, mac_worker, mac_claim, provider_worker,
            providers, ace_client, telemetry, redis_client
 playout/   playout_controller, filler_pool
 tests/     queue/ (10 files) worker/ (3) playout/ (1) + README.md
@@ -534,23 +536,23 @@ tests/     queue/ (10 files) worker/ (3) playout/ (1) + README.md
 
 `worker/redis_client.py` is the shared stdlib RESP2 client for the worker side
 (subclasses set `default_host`). `queue/reaper.py` keeps its own copy on
-purpose: `worker/macbook_claim.py` imports it and runs on the Mac's **system
+purpose: `worker/mac_claim.py` imports it and runs on the Mac's **system
 python**, so it must stay stdlib-only and self-contained.
 
-`worker/acceptance_macbook.py` (was `test_macbook_worker.py`) is deliberately
+`worker/acceptance_mac.py` is deliberately
 NOT under `tests/` — it performs a real paid generation, and a `test_*.py` name
 inside `tests/` would let discovery fire it.
 
 **No third-party runtime dependencies, by design.** `queue-reaper` and
 `provider-worker` run on bare `python:3.12-slim` with no `pip install`, and
-`macbook_claim.py` runs on system python. Pydantic was evaluated and rejected
+`mac_claim.py` runs on system python. Pydantic was evaluated and rejected
 for this reason. Verify before adding an import:
 
 ```sh
 python3 - <<'EOF'
 import ast, pathlib, sys
 local = {p.stem for d in ("queue", "worker", "playout") for p in pathlib.Path(d).glob("*.py")}
-for f in ("queue/reaper.py", "worker/provider_worker.py", "worker/macbook_claim.py"):
+for f in ("queue/reaper.py", "worker/provider_worker.py", "worker/mac_claim.py"):
     for n in ast.walk(ast.parse(pathlib.Path(f).read_text())):
         names = ([a.name for a in n.names] if isinstance(n, ast.Import)
                  else [n.module or ""] if isinstance(n, ast.ImportFrom) else [])
@@ -560,6 +562,51 @@ for f in ("queue/reaper.py", "worker/provider_worker.py", "worker/macbook_claim.
 print("done")
 EOF
 ```
+
+### Worker names are `mac` and `windows`
+
+The two local workers are identified by role, not by the owner's hardware
+(renamed 2026-10-07 from `macbook_air`/`dell` so the repo reads the same for
+anyone who clones it). `mac` is the native Apple Silicon worker; `windows` is
+the containerized CUDA worker (it would run on any Docker + NVIDIA host —
+"windows" is where it was proven). These exact strings are the contract:
+
+| Where | Value |
+|---|---|
+| Redis pending lists | `jobs:pending:mac`, `jobs:pending:windows` |
+| Redis heartbeats | `worker:mac`, `worker:windows` |
+| Job payload field | `"worker": "mac"` / `"windows"` |
+| Postgres | `queue_items.source_assigned` |
+| SQLite | `generation_stats.worker` |
+
+The declaration order of `WORKERS` / `LOCAL_WORKERS` / `CANONICAL` is the
+tie-break for the naive rule, so `("windows", "mac")` preserves the old
+behaviour.
+
+**Migrating an existing deployment.** The rename changes live Redis keys and
+new DB rows, so do this with the stack down:
+
+1. Let the queue drain, or wipe the job keys: `./queue/flush_redis.sh`
+   (its `jobs:pending:*` pattern catches the old names too). An in-flight job
+   whose payload still says `macbook_air` would otherwise be requeued by the
+   reaper onto a list no worker claims.
+2. Keep the timing history, or the manager starts with no measured latency and
+   falls back to defaults until new jobs land:
+
+```sh
+sqlite3 queue/generation_stats.db \
+  "UPDATE generation_stats SET worker='mac' WHERE worker IN ('macbook','macbook_air');
+   UPDATE generation_stats SET worker='windows' WHERE worker='dell';"
+
+docker compose exec -T postgres psql -U radio -d radio -c \
+  "UPDATE queue_items SET source_assigned='mac' WHERE source_assigned IN ('macbook','macbook_air');
+   UPDATE queue_items SET source_assigned='windows' WHERE source_assigned='dell';"
+```
+
+3. Old `worker:macbook_air` / `worker:dell` heartbeat keys need no action —
+   nothing reads them and they expire on their own.
+4. On the Mac, the claimer is now `python3 worker/mac_claim.py`, and its output
+   override is `MAC_OUTPUT_DIR` (was `MACBOOK_OUTPUT_DIR`).
 
 ### Running the tests
 
@@ -588,7 +635,7 @@ its code into the image and does need `--build`.
 * **Day 18** — the 24-hour soak test has not been run.
 * **`SAFETY_MARGIN_SEC=120`** is now shorter than a single 90s-track
   generation. Re-measure from `generation_stats` and retune.
-* **DELL is parked** (needs the <=6 GB VAE decode fix; see `worker/README.md`).
+* **Windows is parked** (needs the <=6 GB VAE decode fix; see `worker/README.md`).
 * `base.GenerationWorker._latency` is a **class** attribute, so instances would
   share one latency window. Harmless today (one worker instance per process),
   a bug the moment two coexist.

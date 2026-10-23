@@ -8,9 +8,9 @@ and GPU/MLX engagement.
 
 Two runtimes, deliberately asymmetric:
 
-- **DELL (Windows + WSL2 + Docker Desktop)** — containerized worker next to a
+- **Windows (WSL2 + Docker Desktop)** — containerized worker next to a
   containerized model server.
-- **MacBook (Apple Silicon)** — NATIVE. Never Docker: there is no MLX/GPU
+- **Mac (Apple Silicon)** — NATIVE. Never Docker: there is no MLX/GPU
   passthrough, so a container would silently run CPU-only.
 
 ## Files
@@ -21,12 +21,12 @@ Two runtimes, deliberately asymmetric:
 | `redis_client.py` | `MiniRedis`, the stdlib RESP2 client shared by the worker scripts. |
 | `ace_client.py` | Stdlib REST client for ACE-Step 1.5 (`release_task` -> `query_result` -> `/v1/audio`), used by both workers. |
 | `telemetry.py` | Best-effort GPU temperature / macOS thermal readers for the heartbeat. Never raises. |
-| `dell_worker.py` | The containerized worker: claim, generate, atomic write, ack, measured timing, `/health`. |
-| `macbook_worker.py` | `MacBookWorker(GenerationWorker)` over the Mac's native ACE-Step server. |
-| `macbook_claim.py` | The Mac's queue claimer (native process, run from the repo root). |
+| `windows_worker.py` | The containerized worker: claim, generate, atomic write, ack, measured timing, `/health`. |
+| `mac_worker.py` | `MacWorker(GenerationWorker)` over the Mac's native ACE-Step server. |
+| `mac_claim.py` | The Mac's queue claimer (native process, run from the repo root). |
 | `provider_worker.py` | Paid providers (ElevenLabs / Gemini Lyra) speaking the same job protocol. |
 | `providers.py` | The two `MusicProvider` adapters, typed errors, quota handling. |
-| `acceptance_macbook.py` | MANUAL acceptance script — performs a REAL generation. Not a unit test. |
+| `acceptance_mac.py` | MANUAL acceptance script — performs a REAL generation. Not a unit test. |
 | `try_elevenlabs.py`, `try_gemini_lyra.py` | Manual one-shot probes. These make REAL PAID API calls. |
 | `Dockerfile` | The slim worker image (python:3.12-slim + nfs-common + fastapi/uvicorn for `/health`). No torch, no model. |
 | `push_test_job.sh` | Master-side fake-job push. |
@@ -49,7 +49,7 @@ One-time prerequisites (owner):
    design; the password is the boundary. Never bind 0.0.0.0.
 4. Worker connectivity check: `nc -vz 192.168.1.210 6379`.
 
-### Windows worker (the proven DELL path — WSL2 + Docker Desktop)
+### Windows worker (WSL2 + Docker Desktop)
 
 Connect over normal Wi-Fi/Ethernet, then follow **Build** and **Run** below.
 The WSL2 quirks documented in Run (in-container NFS mount, `--cap-add
@@ -67,7 +67,7 @@ sudo mount_nfs -o vers=3 192.168.1.210:/srv/radio/tracks /Volumes/radio-tracks
 
 If the mount is refused, retry with `-o vers=3,resvport`. Generation runs
 natively via ACE-Step-1.5's `start_api_server_macos.sh`; the Mac claims jobs
-with `python3 worker/macbook_claim.py`.
+with `python3 worker/mac_claim.py`.
 
 ### Linux worker
 
@@ -82,7 +82,7 @@ installed and exporting on the master (owner-run once, needs sudo):
 ```sh
 sudo apt-get install -y nfs-kernel-server
 sudo mkdir -p /srv/radio/tracks
-# Sticky-writable (/tmp model): the DELL's WSL user (uid 1000) and squashed
+# Sticky-writable (/tmp model): the Windows WSL user (uid 1000) and squashed
 # root (root inside the worker container included) both need to write.
 sudo chmod 1777 /srv/radio/tracks
 # `insecure` is REQUIRED: WSL2's NAT remaps the NFS client's source port to an
@@ -98,7 +98,7 @@ sudo exportfs -ra
 The first export line is the legacy direct-link client, kept until that link
 is physically retired.
 
-## DELL: one-time setup (WSL2, inside any distro)
+## Windows: one-time setup (WSL2, inside any distro)
 
 ```sh
 # Optional, for manual inspection only — the worker container mounts the
@@ -193,7 +193,7 @@ Notes:
   set identical for copy-paste.
 - The whole `worker/` directory is mounted, so code changes need no rebuild.
 - Startup order: `api_wait` (up to `WORKER_API_WAIT_SEC` for the server's
-  first model load) -> `api_ready` -> blocks on `jobs:pending:dell`.
+  first model load) -> `api_ready` -> blocks on `jobs:pending:windows`.
 
 ## Configuration
 
@@ -201,7 +201,7 @@ Notes:
 |---|---|---|
 | `REDIS_URL` | `redis://192.168.1.210:6379/0` | master's LAN address |
 | `REDIS_PASSWORD` | — | required, from master's `.env` |
-| `ACESTEP_API_URL` | `http://127.0.0.1:8001` | the acestep15 server; on DELL use `http://acestep:8001` |
+| `ACESTEP_API_URL` | `http://127.0.0.1:8001` | the acestep15 server; on Windows use `http://acestep:8001` |
 | `TRACKS_DIR` | `/app/tracks` | mount point for `NFS_SOURCE`, atomic rename target |
 | `NFS_SOURCE` | `192.168.1.210:/srv/radio/tracks` | master's export, mounted inside the container at startup |
 | `WORKER_MOUNT_NFS` | `1` | set `0` only when `TRACKS_DIR` is already a mount |
@@ -210,7 +210,7 @@ Notes:
 | `WORKER_LEASE_MULTIPLIER` | `3` | lease = expected x this; use `0.02` for fast failure tests |
 | `WORKER_EXPECTED_PER_TARGET_SEC` | `50` | fixed-guess lease sizing |
 | `WORKER_API_WAIT_SEC` | `7200` | how long to wait for the model server's first load |
-| `MACBOOK_OUTPUT_DIR` | `mac-output` | Mac-local output dir; `macbook_claim.py` sets `/Volumes/radio-tracks` |
+| `MAC_OUTPUT_DIR` | `mac-output` | Mac-local output dir; `mac_claim.py` sets `/Volumes/radio-tracks` |
 
 Model-tier settings (turbo tier, INT8, offload) live in the **acestep15**
 container's env, not here.
@@ -231,7 +231,7 @@ master-local; SQLite over NFS is not trustworthy).
 So an orphaned job returns to `jobs:pending` once its lease expires and any
 worker can reclaim it. With production defaults that is ~2.5 h for a 60 s job.
 
-Health check (from the master or DELL):
+Health check (from the master or Windows):
 
 ```sh
 curl -m 5 -H "x-worker-secret: <WORKER_SHARED_SECRET>" http://192.168.1.51:8001/health
@@ -248,7 +248,7 @@ For tests 1 and 2, run the worker with `-e WORKER_LEASE_MULTIPLIER=0.02` (lease
 3 in production.
 
 1. **Kill mid-generation.** Push a job (`./worker/push_test_job.sh` on the
-   master), then `docker kill <container>` on DELL while it generates. Expect
+   master), then `docker kill <container>` on the Windows box while it generates. Expect
    `job_requeued` in `docker compose logs queue-reaper` within ~a minute of the
    lease lapsing, the job back on `jobs:pending`, and a restarted worker
    claiming and completing it; `jobs:in_progress` ends empty.
@@ -269,7 +269,7 @@ docker compose exec -T redis sh -c 'REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli LL
 python3 -c "import sqlite3; [print(r) for r in sqlite3.connect('queue/generation_stats.db').execute('SELECT * FROM generation_stats')]"
 ```
 
-## MacBook worker (native)
+## Mac worker (native)
 
 `start_api_server_macos.sh` sets `ACESTEP_LM_BACKEND=mlx` and includes
 MLX-version compatibility repair, so the MLX path is entirely theirs:
@@ -290,7 +290,7 @@ is fine). It performs a REAL generation:
 
 ```sh
 cd <path-to>/ai-roi/worker
-python3 acceptance_macbook.py
+python3 acceptance_mac.py
 ```
 
 Expect typed-exception OKs (no server needed), then `api_ready`, a real file in
@@ -298,7 +298,7 @@ Expect typed-exception OKs (no server needed), then `api_ready`, a real file in
 
 ## Generated track file names
 
-Every worker (MacBook, DELL, provider-worker) names a generated track
+Every worker (Mac, Windows, provider-worker) names a generated track
 `<prompt-slug>-<jobid8>.<ext>`, e.g. `rainy-lofi-piano-3fa85f64.mp3`, built by
 `base.track_stem()`. The slug is the first ~60 characters of the prompt,
 lowercased ASCII with single hyphens; the 8-character job id keeps identical
@@ -310,7 +310,7 @@ Tracks generated before this convention keep their old names.
 ## Acceptance tests
 
 1. `nvidia-smi` inside the CUDA test container shows the RTX 2060.
-2. Master: `./worker/push_test_job.sh` (or edit the script's `prompt`), DELL
+2. Master: `./worker/push_test_job.sh` (or edit the script's `prompt`), Windows
    logs `job_claimed` -> `job_done` with `generation_sec`, and a playable file
    appears in the master's `/srv/radio/tracks`.
 3. During generation, `watch -n1 ls /srv/radio/tracks` on the master: you must
@@ -323,5 +323,5 @@ Tracks generated before this convention keep their old names.
   acked. The master's queue-reaper is the safety net for the cases the worker
   cannot report itself: it requeues any job whose lease expired because the
   worker died, the link dropped, or it failed silently.
-- Old DELL timing baselines from the pre-1.5 engine (1365.55 s, 1400.3 s) are
+- Old Windows timing baselines from the pre-1.5 engine (1365.55 s, 1400.3 s) are
   void: different engine, different step defaults (8 on 1.5-turbo vs 60).

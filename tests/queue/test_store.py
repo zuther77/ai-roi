@@ -30,12 +30,12 @@ class QueueStoreTest(unittest.TestCase):
     def test_claim_ready_is_fifo_and_marks_playing(self):
         a = self.store.enqueue("alpha")
         b = self.store.enqueue("beta")
-        self.store.mark_generating(a["id"], "macbook_air")
-        self.store.mark_generating(b["id"], "macbook_air")
+        self.store.mark_generating(a["id"], "mac")
+        self.store.mark_generating(b["id"], "mac")
         self.store.mark_ready(a["id"], file_path="/srv/radio/tracks/a.mp3",
-                              source="macbook_air", generation_time_sec=95.0)
+                              source="mac", generation_time_sec=95.0)
         self.store.mark_ready(b["id"], file_path="/srv/radio/tracks/b.mp3",
-                              source="macbook_air", generation_time_sec=96.0)
+                              source="mac", generation_time_sec=96.0)
 
         claimed = self.store.claim_next_ready()
         self.assertEqual(claimed["queue_item_id"], a["id"])
@@ -51,9 +51,9 @@ class QueueStoreTest(unittest.TestCase):
 
     def test_interrupted_playing_item_returns_to_ready(self):
         item = self.store.enqueue("alpha")
-        self.store.mark_generating(item["id"], "dell")
+        self.store.mark_generating(item["id"], "windows")
         self.store.mark_ready(item["id"], file_path="/srv/radio/tracks/a.wav",
-                              source="dell", generation_time_sec=10.0)
+                              source="windows", generation_time_sec=10.0)
         self.store.claim_next_ready()
         self.store.requeue_interrupted()
         again = self.store.claim_next_ready()
@@ -62,26 +62,26 @@ class QueueStoreTest(unittest.TestCase):
     def test_last_assigned_worker_follows_dispatch_not_enqueue(self):
         item = self.store.enqueue("alpha")
         self.assertIsNone(self.store.last_assigned_worker())
-        self.store.mark_generating(item["id"], "macbook_air")
-        self.assertEqual(self.store.last_assigned_worker(), "macbook_air")
+        self.store.mark_generating(item["id"], "mac")
+        self.assertEqual(self.store.last_assigned_worker(), "mac")
 
     def test_second_ready_from_a_hedge_loser_does_not_apply(self):
         item = self.store.enqueue("race")
-        self.store.mark_generating(item["id"], "macbook_air")
+        self.store.mark_generating(item["id"], "mac")
         self.assertTrue(self.store.mark_ready(
             item["id"], file_path="/srv/radio/tracks/a.wav",
-            source="macbook_air", generation_time_sec=95.0,
+            source="mac", generation_time_sec=95.0,
         ))
         self.assertFalse(self.store.mark_ready(
             item["id"], file_path="/srv/radio/tracks/b.wav",
-            source="dell", generation_time_sec=400.0,
+            source="windows", generation_time_sec=400.0,
         ))
         claimed = self.store.claim_next_ready()
         self.assertEqual(claimed["file_path"], "/srv/radio/tracks/a.wav")
 
     def test_mark_failed(self):
         item = self.store.enqueue("nope")
-        self.store.mark_generating(item["id"], "dell")
+        self.store.mark_generating(item["id"], "windows")
         self.store.mark_failed(item["id"])
         self.assertIsNone(self.store.claim_next_ready())
         self.assertIsNone(self.store.next_queued())

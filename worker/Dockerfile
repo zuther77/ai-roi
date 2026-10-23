@@ -21,7 +21,7 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# No code baked in: the whole worker/ directory (dell_worker.py,
+# No code baked in: the whole worker/ directory (windows_worker.py,
 # ace_client.py, base.py) is bind-mounted read-only at run time, so code
 # changes never need an image rebuild.
-CMD ["python", "/app/worker/dell_worker.py"]
+CMD ["python", "/app/worker/windows_worker.py"]

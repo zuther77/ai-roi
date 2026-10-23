@@ -1,7 +1,7 @@
 """Shared ACE-Step 1.5 REST client, used by BOTH local workers.
 
-  - DELL:    the acestep15 container over the docker network (ACESTEP_API_URL)
-  - MacBook: the server started by ACE-Step's own start_api_server_macos.sh
+  - Windows: the acestep15 container over the docker network (ACESTEP_API_URL)
+  - Mac:     the server started by ACE-Step's own start_api_server_macos.sh
 
 Contract:
   POST /release_task  {prompt, lyrics, audio_duration, thinking:false}

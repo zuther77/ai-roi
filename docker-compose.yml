@@ -74,7 +74,7 @@ services:
       - ${TRACKS_HOST_DIR:-./tracks}:/srv/radio/tracks:ro
 
   # ─────────────────────────────────────────────────────────────────────────
-  # Day 4 — Redis: the shared job queue between master and the DELL worker
+  # Day 4 — Redis: the shared job queue between master and the Windows worker
   # (design spec Section 3.5; detailed-plan Day 4). A Compose service, not a
   # native install — the master stays 100% containerized (working rule 4).
   redis:
@@ -111,14 +111,14 @@ services:
   # ─────────────────────────────────────────────────────────────────────────
   # Day 6 — queue-reaper: job-lease enforcement + generation-stats recorder
   # (detailed-plan Day 6). Runs on the master, deliberately independent of
-  # the DELL link — a dead or disconnected worker cannot leave a job stuck
+  # the workers' network — a dead or disconnected worker cannot leave a job stuck
   # in jobs:in_progress forever, because lease expiry is decided here.
   # restart: always per the plan's pitfall: never a one-off script.
   queue-reaper:
     image: python:3.12-slim
     env_file: .env
     environment:
-      # In-network address; .env's REDIS_URL is the DELL-facing one.
+      # In-network address; .env's REDIS_URL is the LAN one the workers use.
       REDIS_URL: redis://redis:6379/0
       STATS_DB: /app/queue/generation_stats.db
     volumes:

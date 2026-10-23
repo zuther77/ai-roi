@@ -35,7 +35,7 @@ r() {
 }
 
 # Every key pattern this project writes to Redis. jobs:pending:* covers
-# dell / macbook_air / elevenlabs / gemini_lyra and any future worker name
+# windows / mac / elevenlabs / gemini_lyra and any future worker name
 # without hardcoding the list here.
 PATTERNS="jobs:pending:* jobs:pending jobs:in_progress jobs:completed job:lease:* job:cancel:* hedge:items hedge:item:* worker:* generation:stats ratelimit:*"
 

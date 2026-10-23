@@ -152,7 +152,7 @@ class QueueAndModerationTest(unittest.TestCase):
 
     def test_depth_matches_a_direct_count(self):
         for st in ("queued", "queued", "generating", "ready", "played", "failed"):
-            self.add(st, "macbook_air" if st != "queued" else None)
+            self.add(st, "mac" if st != "queued" else None)
         q = status.collect_queue(self.store)
         direct = self.store._one(
             "SELECT COUNT(*) AS n FROM queue_items"
@@ -190,13 +190,13 @@ class QueueAndModerationTest(unittest.TestCase):
         self.assertTrue(status.collect_moderation(self.store, datetime.now(timezone.utc))["warn"])
 
     def test_failure_rate_is_per_source_from_the_queue_table(self):
-        self.add("failed", "macbook_air")
-        self.add("played", "macbook_air")
-        self.add("played", "macbook_air")
+        self.add("failed", "mac")
+        self.add("played", "mac")
+        self.add("played", "mac")
         self.add("ready", "elevenlabs")
-        self.add("generating", "macbook_air")               # not finished: excluded
+        self.add("generating", "mac")               # not finished: excluded
         f = status.collect_failures(self.store, datetime.now(timezone.utc))["by_source"]
-        self.assertEqual(f["macbook_air"], {"failed": 1, "finished": 3, "rate": 0.3333})
+        self.assertEqual(f["mac"], {"failed": 1, "finished": 3, "rate": 0.3333})
         self.assertEqual(f["elevenlabs"]["rate"], 0.0)
 
     def test_prompt_text_never_appears_in_any_section(self):
@@ -210,19 +210,19 @@ class QueueAndModerationTest(unittest.TestCase):
 
 class WorkersAndProvidersTest(unittest.TestCase):
     def test_stopped_worker_goes_down_while_the_other_stays_up(self):
-        # the plan's acceptance example: stop DELL, its tile goes down
-        r = FakeRedis(kv={"worker:macbook_air": '{"busy": false, "thermal": "ok"}'},
-                      ttls={"worker:macbook_air": 17})
-        w = status.collect_workers(r, {"macbook_air": {"avg_sec": 120.5, "samples": 4}}, {})
-        self.assertEqual(w["dell"]["state"], "down")
-        self.assertEqual(w["macbook_air"]["state"], "idle")
-        self.assertEqual(w["macbook_air"]["age_sec"], 3)
-        self.assertEqual(w["macbook_air"]["avg_latency_sec"], 120.5)
-        self.assertEqual(w["macbook_air"]["thermal"], "ok")
+        # the plan's acceptance example: stop Windows, its tile goes down
+        r = FakeRedis(kv={"worker:mac": '{"busy": false, "thermal": "ok"}'},
+                      ttls={"worker:mac": 17})
+        w = status.collect_workers(r, {"mac": {"avg_sec": 120.5, "samples": 4}}, {})
+        self.assertEqual(w["windows"]["state"], "down")
+        self.assertEqual(w["mac"]["state"], "idle")
+        self.assertEqual(w["mac"]["age_sec"], 3)
+        self.assertEqual(w["mac"]["avg_latency_sec"], 120.5)
+        self.assertEqual(w["mac"]["thermal"], "ok")
 
     def test_pending_jobs_are_shown(self):
-        r = FakeRedis(lists={"jobs:pending:macbook_air": ["a", "b"]})
-        self.assertEqual(status.collect_workers(r, {}, {})["macbook_air"]["pending_jobs"], 2)
+        r = FakeRedis(lists={"jobs:pending:mac": ["a", "b"]})
+        self.assertEqual(status.collect_workers(r, {}, {})["mac"]["pending_jobs"], 2)
 
     def test_unconfigured_provider_is_labelled_not_hidden(self):
         r = FakeRedis()
@@ -253,13 +253,13 @@ class WorkersAndProvidersTest(unittest.TestCase):
                       " worker TEXT, generation_time_sec REAL, target_duration_sec REAL, completed_at TEXT)")
             for sec in (100, 200):
                 c.execute("INSERT INTO generation_stats (job_id,worker,generation_time_sec,target_duration_sec,"
-                          "completed_at) VALUES ('j','macbook_air',?,30,'t')", (sec,))
+                          "completed_at) VALUES ('j','mac',?,30,'t')", (sec,))
             c.execute("INSERT INTO generation_stats (job_id,worker,generation_time_sec,target_duration_sec,"
                       "completed_at) VALUES ('k','elevenlabs',9,30,'t')")
             c.commit(); c.close()
             lat = status.read_latency(path)
-        self.assertEqual(lat["macbook_air"]["avg_sec"], 150.0)
-        self.assertEqual(lat["macbook_air"]["last_sec"], 200.0)
+        self.assertEqual(lat["mac"]["avg_sec"], 150.0)
+        self.assertEqual(lat["mac"]["last_sec"], 200.0)
         self.assertEqual(lat["elevenlabs"]["samples"], 1)
 
     def test_missing_stats_db_is_empty_not_an_error(self):
@@ -283,8 +283,8 @@ class CollectorAndHttpTest(unittest.TestCase):
         store = memory_store()
         store.enqueue("hello")
         return status.Collector(
-            store, redis_factory or (lambda: FakeRedis(kv={"worker:macbook_air": '{"busy": true}'},
-                                                       ttls={"worker:macbook_air": 20})),
+            store, redis_factory or (lambda: FakeRedis(kv={"worker:mac": '{"busy": true}'},
+                                                       ttls={"worker:mac": 20})),
             env=env or self.ENV)
 
     def test_snapshot_shape_and_mode(self):
@@ -293,7 +293,7 @@ class CollectorAndHttpTest(unittest.TestCase):
                     "stream", "moderation", "failures", "pool"):
             self.assertIn(key, d)
         self.assertEqual(d["mode"]["generation_mode"], "hybrid")
-        self.assertEqual(d["workers"]["macbook_air"]["state"], "busy")
+        self.assertEqual(d["workers"]["mac"]["state"], "busy")
 
     def test_no_secret_leaks_into_the_payload(self):
         self.assertNotIn("SECRET-KEY-VALUE", json.dumps(self.collector().snapshot()))
@@ -315,14 +315,14 @@ class CollectorAndHttpTest(unittest.TestCase):
             calls["n"] += 1
             if calls["n"] == 1:
                 raise ConnectionError("down")
-            return FakeRedis(kv={"worker:macbook_air": '{"busy": false}'},
-                             ttls={"worker:macbook_air": 20})
+            return FakeRedis(kv={"worker:mac": '{"busy": false}'},
+                             ttls={"worker:mac": 20})
 
         c = self.collector(redis_factory=flaky)
         status.CACHE_TTL_SEC, saved = 0.0, status.CACHE_TTL_SEC
         try:
             self.assertIn("error", c.snapshot()["workers"])
-            self.assertEqual(c.snapshot()["workers"]["macbook_air"]["state"], "idle")
+            self.assertEqual(c.snapshot()["workers"]["mac"]["state"], "idle")
         finally:
             status.CACHE_TTL_SEC = saved
 
@@ -472,7 +472,7 @@ class NowPlayingSectionTest(unittest.TestCase):
     def test_a_same_named_file_in_another_dir_is_matched_by_basename_only(self):
         self.store._exec(
             "INSERT INTO tracks (id,file_path,duration_sec,source,generation_time_sec,is_filler,validated)"
-            " VALUES ('t2','/srv/radio/tracks/x_ap-phonk-4b5e8576.mp3',1,'dell',1,0,0)")
+            " VALUES ('t2','/srv/radio/tracks/x_ap-phonk-4b5e8576.mp3',1,'windows',1,0,0)")
         p = self.log(ev("track_start", NOW, track="afro-phonk-4b5e8576.mp3", duration_sec=180))
         self.assertEqual(status.collect_now_playing(self.store, NOW, p)["source"], "elevenlabs")
 

@@ -80,7 +80,7 @@ sudo exportfs -ra
 Why `insecure`: the Windows worker's WSL2 layer NATs the NFS client's
 source port to an unprivileged one on every network (not just Wi-Fi), and
 Linux's nfsd refuses non-privileged ports without this option. Confirmed
-live: the DELL's mount said "access denied by server" until `insecure`
+live: the Windows box's mount said "access denied by server" until `insecure`
 was added (Sprint 2).
 
 **Step 5 — Verify the server is listening and exporting:**
@@ -127,7 +127,7 @@ Notes, both learned the hard way on this project:
 - **Docker containers on this machine cannot bind-mount this path**
   (`timed out waiting ... to be automounted` — a Docker Desktop WSL2
   limitation): the *worker container* mounts the NFS export inside
-  itself instead. That is the DELL runbook in `worker/README.md`; this
+  itself instead. That is the Windows runbook in `worker/README.md`; this
   page tests the machine-level mount.
 
 ### macOS worker (native, no WSL)

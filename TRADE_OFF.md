@@ -36,7 +36,7 @@ Ordered roughly by the day/area they were decided.
 - **Chosen:** the master's NFS tracks export is readable across the LAN subnet;
   `root_squash` + `1777` permissions.
 - **Given up:** tight per-host NFS access control (the retired direct-link design
-  had the export scoped to one DELL IP).
+  had the export scoped to one Windows IP).
 - **Why:** the project targets a single-household Wi-Fi network; every worker now
   joins over plain DHCP and self-registers, so a fixed per-host export list does
   not fit. `root_squash` + `1777` confine the exposure to "junk written into the
@@ -45,7 +45,7 @@ Ordered roughly by the day/area they were decided.
 
 ### Direct Ethernet link retired in favor of plain LAN/Wi-Fi
 - **Chosen:** every worker, any OS, reaches the master over the regular LAN.
-- **Given up:** the isolation of a dedicated master↔DELL subnet (no contention,
+- **Given up:** the isolation of a dedicated master↔Windows subnet (no contention,
   one less shared component).
 - **Why:** payloads are tiny (small audio files + light API calls); the isolation
   benefit did not justify cabling and static-IP management for a portable fleet.
@@ -59,11 +59,11 @@ Ordered roughly by the day/area they were decided.
   mandatory password (never passwordless, never in argv) is the compensating
   control. Reachable-from-LAN is by design, not an oversight.
 
-### DELL worker parked rather than fixed
-- **Chosen:** DELL (RTX 2060, 6 GB) is parked; the MacBook is the only live
+### Windows worker parked rather than fixed
+- **Chosen:** the Windows box (RTX 2060, 6 GB) is parked; the Mac is the only live
   worker.
-- **Given up:** ~3x generation throughput DELL provides when working.
-- **Why:** DELL's ACE-Step 1.5 re-baseline needs a <=6 GB VAE-decode fix
+- **Given up:** ~3x generation throughput the Windows box provides when working.
+- **Why:** the Windows box's ACE-Step 1.5 re-baseline needs a <=6 GB VAE-decode fix
   (`ACESTEP_VAE_ON_CPU=1` + chunked decode). Deferred by owner decision; the
   system is designed to run fine on one worker + filler, so this is a throughput
   trade-off, not a correctness one.
@@ -358,7 +358,7 @@ Ordered roughly by the day/area they were decided.
 
 ### Local workers produce at least 90s (`LOCAL_MIN_DURATION_SEC`); paid providers do not
 - **Chosen:** the queue manager raises every job it builds for a local worker
-  (MacBook, DELL, and a hedge backup to either) to at least
+  (Mac, Windows, and a hedge backup to either) to at least
   `LOCAL_MIN_DURATION_SEC` (default 90s). A longer request is kept. Paid
   providers still get the item's own length (30s by default).
 - **Given up:**
@@ -383,7 +383,7 @@ Ordered roughly by the day/area they were decided.
      worker was asked for; the real value is in the `item_assigned` log and the
      job payload. Deadline math falls back to the local floor (90s) because no
      measured durations are recorded yet.
-- **Why at the manager:** one place covers the Mac, the DELL and hedge backups,
+- **Why at the manager:** one place covers the Mac, the Windows worker and hedge backups,
   and the setting lives in the master's `.env`, not on each worker machine. A
   bad value (outside 5-300s, the worker's own validation range) stops the manager
   at startup instead of making every local job fail.
@@ -476,12 +476,12 @@ Ordered roughly by the day/area they were decided.
   (the file rotates at 5 MB) and counts container restarts too.
 
 ### Temperatures are reported by the workers, best-effort
-- **Chosen:** the Mac heartbeat carries `thermal` (from `pmset -g therm`) and the DELL
+- **Chosen:** the Mac heartbeat carries `thermal` (from `pmset -g therm`) and the Windows
   heartbeat `temperature_c` (from `nvidia-smi`); both are cached 30s and silently absent
   if the tool is missing.
 - **Given up / unverified:** the Mac parser was run against this machine's real
   all-clear output, but the "throttled" format is assumed from Apple's documentation;
-  the DELL reader is parsed against sample `nvidia-smi` output only (DELL is parked, and
+  the Windows reader is parsed against sample `nvidia-smi` output only (Windows is parked, and
   the slim worker container may not have `nvidia-smi` at all).
 - **Not built:** disk usage is shown for the tracks volume only; the spec's per-GPU
   alerting thresholds are not implemented.

@@ -1,10 +1,10 @@
-"""DELL generation worker: claims jobs from Redis and generates via ACE-Step.
+"""Windows generation worker: claims jobs from Redis and generates via ACE-Step.
 
 Runs inside worker/Dockerfile's image. No model code lives here — the
 ACE-Step 1.5 API server (its own container) owns the pipeline, checkpoints and
 GPU; this is a slim client over ace_client.py.
 
-Per job: atomic claim (BRPOPLPUSH jobs:pending:dell -> jobs:in_progress),
+Per job: atomic claim (BRPOPLPUSH jobs:pending:windows -> jobs:in_progress),
 generate, write the track to the master's NFS mount, ack via LREM, and record
 the measured generation time for the queue manager's timing math.
 
@@ -32,11 +32,11 @@ from base import track_stem
 from redis_client import MiniRedis as _MiniRedis, RedisError
 from telemetry import Cached, gpu_temperature_c
 
-WORKER = "dell"
+WORKER = "windows"
 
 # The queue manager pushes onto a per-worker list; the override only exists so
 # a test can point this worker at the old shared list.
-PENDING_KEY = os.environ.get("JOBS_PENDING_KEY", "jobs:pending:dell")
+PENDING_KEY = os.environ.get("JOBS_PENDING_KEY", "jobs:pending:windows")
 IN_PROGRESS_KEY = "jobs:in_progress"
 COMPLETED_KEY = "jobs:completed"
 STATS_KEY = "generation:stats"
@@ -334,7 +334,7 @@ def main() -> int:
     try:
         gen = Generator()  # connect once; the API server owns the model
         # GPU availability is attested by the acestep15 container's startup
-        # banner, which the DELL runbook greps (worker/README.md).
+        # banner, which the Windows runbook greps (worker/README.md).
         health_state["gpu_available"] = True
         health_state["model_loaded"] = True
         log("worker_ready", api_url=ACESTEP_API_URL)

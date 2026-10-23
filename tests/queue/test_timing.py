@@ -1,6 +1,6 @@
 """Worker selection and hedge timing. Seeded latencies, no Redis, no Postgres.
 
-The naive rule with both workers idle and nobody assigned yet picks dell;
+The naive rule with both workers idle and nobody assigned yet picks windows;
 measured latencies pick the faster idle worker instead.
 """
 
@@ -40,17 +40,17 @@ def health(ok=True, busy=False, avg=None, free=0):
     }
 
 
-def both_idle(dell_avg, mac_avg, dell_ok=True, mac_ok=True):
+def both_idle(windows_avg, mac_avg, windows_ok=True, mac_ok=True):
     return {
-        "dell": health(ok=dell_ok, avg=dell_avg),
-        "macbook_air": health(ok=mac_ok, avg=mac_avg),
+        "windows": health(ok=windows_ok, avg=windows_avg),
+        "mac": health(ok=mac_ok, avg=mac_avg),
     }
 
 
 def naive_both_free():
     return [
-        WorkerState("dell", healthy=True, busy=False),
-        WorkerState("macbook_air", healthy=True, busy=False),
+        WorkerState("windows", healthy=True, busy=False),
+        WorkerState("mac", healthy=True, busy=False),
     ]
 
 
@@ -71,7 +71,7 @@ class ChooseByLatencyTest(unittest.TestCase):
     def test_both_idle_picks_the_faster_worker(self):
         plan = plan_assignment(
             mode="local_only",
-            worker_health=both_idle(dell_avg=1365.55, mac_avg=95.15),
+            worker_health=both_idle(windows_avg=1365.55, mac_avg=95.15),
             provider_health=stub_provider_health(),
             queue_depth=12,
             queue_position=1,
@@ -80,15 +80,15 @@ class ChooseByLatencyTest(unittest.TestCase):
             naive_states=naive_both_free(),
             last_assigned=None,
         )
-        self.assertEqual(plan.naive_worker, "dell")
-        self.assertEqual(plan.worker, "macbook_air")
+        self.assertEqual(plan.naive_worker, "windows")
+        self.assertEqual(plan.worker, "mac")
         self.assertIsNone(plan.hedge_worker)
         self.assertEqual(plan.policy, "single_worker_per_item")
 
     def test_seeded_slow_mac_flips_the_choice(self):
         fast_mac = plan_assignment(
             mode="local_only",
-            worker_health=both_idle(dell_avg=100, mac_avg=95),
+            worker_health=both_idle(windows_avg=100, mac_avg=95),
             provider_health=stub_provider_health(),
             queue_depth=12,
             queue_position=3,
@@ -99,7 +99,7 @@ class ChooseByLatencyTest(unittest.TestCase):
         )
         slow_mac = plan_assignment(
             mode="local_only",
-            worker_health=both_idle(dell_avg=100, mac_avg=500),
+            worker_health=both_idle(windows_avg=100, mac_avg=500),
             provider_health=stub_provider_health(),
             queue_depth=12,
             queue_position=3,
@@ -108,39 +108,39 @@ class ChooseByLatencyTest(unittest.TestCase):
             naive_states=naive_both_free(),
             last_assigned=None,
         )
-        self.assertEqual(fast_mac.worker, "macbook_air")
-        self.assertEqual(slow_mac.worker, "dell")
+        self.assertEqual(fast_mac.worker, "mac")
+        self.assertEqual(slow_mac.worker, "windows")
 
     def test_parked_worker_is_never_primary_or_backup(self):
         plan = plan_assignment(
             mode="local_only",
-            worker_health=both_idle(dell_avg=50, mac_avg=95, dell_ok=False),
+            worker_health=both_idle(windows_avg=50, mac_avg=95, windows_ok=False),
             provider_health=stub_provider_health(),
             queue_depth=1,
             queue_position=1,
             avg_track_length_sec=30,
             now=NOW,
             naive_states=[
-                WorkerState("dell", healthy=False, busy=False),
-                WorkerState("macbook_air", healthy=True, busy=False),
+                WorkerState("windows", healthy=False, busy=False),
+                WorkerState("mac", healthy=True, busy=False),
             ],
             last_assigned=None,
         )
-        self.assertEqual(plan.worker, "macbook_air")
+        self.assertEqual(plan.worker, "mac")
         self.assertIsNone(plan.hedge_worker)
 
     def test_no_healthy_worker_is_filler(self):
         plan = plan_assignment(
             mode="local_only",
-            worker_health=both_idle(dell_avg=1, mac_avg=1, dell_ok=False, mac_ok=False),
+            worker_health=both_idle(windows_avg=1, mac_avg=1, windows_ok=False, mac_ok=False),
             provider_health=stub_provider_health(),
             queue_depth=1,
             queue_position=1,
             avg_track_length_sec=30,
             now=NOW,
             naive_states=[
-                WorkerState("dell", healthy=False, busy=False),
-                WorkerState("macbook_air", healthy=False, busy=False),
+                WorkerState("windows", healthy=False, busy=False),
+                WorkerState("mac", healthy=False, busy=False),
             ],
             last_assigned=None,
         )
@@ -178,8 +178,8 @@ class HedgePolicyTest(unittest.TestCase):
             last_assigned=None,
         )
         self.assertEqual(plan.policy, "hedge_aggressively")
-        self.assertEqual(plan.worker, "macbook_air")
-        self.assertEqual(plan.hedge_worker, "dell")
+        self.assertEqual(plan.worker, "mac")
+        self.assertEqual(plan.hedge_worker, "windows")
         self.assertEqual(plan.start_hedge_after_sec, 1.0)
 
     def test_dropping_depth_is_what_turns_hedging_on(self):
@@ -206,7 +206,7 @@ class HedgePolicyTest(unittest.TestCase):
             last_assigned=None,
         )
         self.assertIsNone(deep.hedge_worker)
-        self.assertEqual(shallow.hedge_worker, "dell")
+        self.assertEqual(shallow.hedge_worker, "windows")
 
     def test_inside_the_margin_the_primary_waits_one_second(self):
         self.assertEqual(primary_wait_sec(30, SAFETY_MARGIN_SEC), 1.0)
@@ -255,19 +255,19 @@ class ParseLocalMinTest(unittest.TestCase):
 
 class EffectiveDurationTest(unittest.TestCase):
     def test_local_workers_are_raised_to_the_floor(self):
-        for worker in ("macbook_air", "dell"):
+        for worker in ("mac", "windows"):
             with self.subTest(worker=worker):
                 self.assertEqual(effective_duration_sec(worker, 30, 90), 90)
 
     def test_a_longer_request_is_kept(self):
-        self.assertEqual(effective_duration_sec("macbook_air", 150, 90), 150)
+        self.assertEqual(effective_duration_sec("mac", 150, 90), 150)
 
     def test_exactly_at_the_floor(self):
-        self.assertEqual(effective_duration_sec("macbook_air", 90, 90), 90)
+        self.assertEqual(effective_duration_sec("mac", 90, 90), 90)
 
     def test_fractional_values_round_up_never_below_the_minimum(self):
-        self.assertEqual(effective_duration_sec("macbook_air", 30, 89.2), 90)
-        self.assertEqual(effective_duration_sec("macbook_air", 90.4, 90), 91)
+        self.assertEqual(effective_duration_sec("mac", 30, 89.2), 90)
+        self.assertEqual(effective_duration_sec("mac", 90.4, 90), 91)
 
     def test_paid_providers_get_their_own_floor_not_the_local_one(self):
         for provider in ("elevenlabs", "gemini_lyra"):
@@ -292,7 +292,7 @@ class HybridNoLocalWorkerTest(unittest.TestCase):
 
     def health(self, ok):
         return {name: {"ok": ok, "busy": False, "avg_latency_sec": None,
-                       "estimated_free_in_sec": 0} for name in ("dell", "macbook_air")}
+                       "estimated_free_in_sec": 0} for name in ("windows", "mac")}
 
     def providers(self, el_ok, el_quota, gm_ok=False):
         return {"elevenlabs": {"ok": el_ok, "quota_remaining": el_quota},
@@ -339,13 +339,13 @@ class ManagerJobPayloadTest(unittest.TestCase):
         return json.loads(manager._job_payload(self.ITEM, worker, "job-1", hedge))
 
     def test_job_for_the_mac_asks_for_at_least_90s(self):
-        self.assertGreaterEqual(self._payload("macbook_air")["target_duration_sec"], 90)
+        self.assertGreaterEqual(self._payload("mac")["target_duration_sec"], 90)
 
-    def test_job_for_dell_asks_for_at_least_90s(self):
-        self.assertGreaterEqual(self._payload("dell")["target_duration_sec"], 90)
+    def test_job_for_windows_asks_for_at_least_90s(self):
+        self.assertGreaterEqual(self._payload("windows")["target_duration_sec"], 90)
 
     def test_hedge_backup_to_a_local_worker_also_gets_the_floor(self):
-        self.assertGreaterEqual(self._payload("macbook_air", hedge=True)["target_duration_sec"], 90)
+        self.assertGreaterEqual(self._payload("mac", hedge=True)["target_duration_sec"], 90)
 
     def test_job_for_a_paid_provider_is_3_minutes(self):
         self.assertEqual(self._payload("elevenlabs")["target_duration_sec"], 180)
@@ -362,14 +362,14 @@ class ManagerJobPayloadTest(unittest.TestCase):
         old = manager.LOCAL_MIN_DURATION_SEC
         manager.LOCAL_MIN_DURATION_SEC = 120.0
         try:
-            self.assertEqual(self._payload("macbook_air")["target_duration_sec"], 120)
+            self.assertEqual(self._payload("mac")["target_duration_sec"], 120)
         finally:
             manager.LOCAL_MIN_DURATION_SEC = old
 
     def test_the_job_still_passes_worker_side_validation(self):
         # A floor the worker would reject would fail every local job.
         from base import validate_request
-        job = self._payload("macbook_air")
+        job = self._payload("mac")
         validate_request(job["prompt"], job["target_duration_sec"])
 
 
@@ -386,8 +386,8 @@ def providers_down():
 
 def both_down():
     return {
-        "dell": health(ok=False),
-        "macbook_air": health(ok=False),
+        "windows": health(ok=False),
+        "mac": health(ok=False),
     }
 
 
@@ -491,7 +491,7 @@ class ModeRoutingTest(unittest.TestCase):
                                   {"elevenlabs": {"quota_remaining": 100}},
                                   ["elevenlabs"])
         plan = self._plan("local_only", both_idle(1365, 95), ph)
-        self.assertEqual(plan.worker, "macbook_air")  # a local worker, never paid
+        self.assertEqual(plan.worker, "mac")  # a local worker, never paid
 
     def test_hybrid_falls_to_local_when_providers_present(self):
         # Both local workers up: hybrid still prefers local (local is primary).
@@ -499,7 +499,7 @@ class ModeRoutingTest(unittest.TestCase):
                                   {"elevenlabs": {"quota_remaining": 100}},
                                   ["elevenlabs"])
         plan = self._plan("hybrid", both_idle(1365, 95), ph)
-        self.assertIn(plan.worker, ("dell", "macbook_air"))
+        self.assertIn(plan.worker, ("windows", "mac"))
 
     def test_hybrid_no_local_falls_to_provider_not_filler(self):
         # Edge case #33: hybrid with both local workers down falls to a paid

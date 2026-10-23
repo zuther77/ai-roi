@@ -81,7 +81,7 @@ class LatencyTrackerTest(unittest.TestCase):
 class AudioResultTest(unittest.TestCase):
     RESULT = AudioResult(
         track_path="/tmp/x.wav", prompt="beat", target_duration_sec=30,
-        generation_sec=12.5, worker="macbook", backend="mps",
+        generation_sec=12.5, worker="mac", backend="mps",
         completed_at="2026-10-03T00:00:00+00:00")
 
     def test_frozen(self):

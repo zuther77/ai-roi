@@ -42,8 +42,8 @@ class LeaseKeyTest(unittest.TestCase):
 
 class PendingListTest(unittest.TestCase):
     def test_worker_field_selects_that_workers_list(self):
-        raw = json.dumps({"job_id": "j", "worker": "macbook_air"})
-        self.assertEqual(reaper.pending_list_for(raw), "jobs:pending:macbook_air")
+        raw = json.dumps({"job_id": "j", "worker": "mac"})
+        self.assertEqual(reaper.pending_list_for(raw), "jobs:pending:mac")
 
     def test_legacy_job_stays_on_the_shared_list(self):
         raw = json.dumps({"job_id": "j", "prompt": "x"})
@@ -63,14 +63,14 @@ class DecideRequeueTest(unittest.TestCase):
 
 class StatsRowTest(unittest.TestCase):
     ROW = {
-        "job_id": "j1", "worker": "dell", "generation_time_sec": 136.5,
+        "job_id": "j1", "worker": "windows", "generation_time_sec": 136.5,
         "target_duration_sec": 30, "completed_at": "2026-09-24T00:00:00+00:00",
     }
 
     def test_valid_row(self):
         self.assertEqual(
             reaper.stats_row(json.dumps(self.ROW)),
-            ("j1", "dell", 136.5, 30.0, "2026-09-24T00:00:00+00:00"),
+            ("j1", "windows", 136.5, 30.0, "2026-09-24T00:00:00+00:00"),
         )
 
     def test_missing_generation_time_raises(self):

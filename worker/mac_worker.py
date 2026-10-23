@@ -1,4 +1,4 @@
-"""MacBook generation worker: the only NATIVE worker.
+"""Mac generation worker: the only NATIVE worker.
 
 Never containerized: Docker on Apple Silicon has no MLX/GPU passthrough, so a
 container would silently run CPU-only.
@@ -23,10 +23,10 @@ from ace_client import AceStepClient, extract_audio_path
 from base import (AudioResult, GenerationWorker, WorkerError, track_stem,
                   validate_request)
 
-WORKER_NAME = "macbook"
+WORKER_NAME = "mac"
 # Their macOS launcher binds the API server on localhost:8001.
 API_URL = os.environ.get("ACESTEP_API_URL", "http://127.0.0.1:8001")
-OUTPUT_DIR = os.environ.get("MACBOOK_OUTPUT_DIR", "mac-output")
+OUTPUT_DIR = os.environ.get("MAC_OUTPUT_DIR", "mac-output")
 
 
 def log(event: str, **fields) -> None:
@@ -36,7 +36,7 @@ def log(event: str, **fields) -> None:
     print(json.dumps(entry), flush=True)
 
 
-class MacBookWorker(GenerationWorker):
+class MacWorker(GenerationWorker):
     """Construct, call ensure_server() (or let the first generate() do it),
     then generate()."""
 

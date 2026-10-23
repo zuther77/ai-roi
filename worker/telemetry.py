@@ -1,6 +1,6 @@
 """Optional hardware telemetry for worker heartbeats. Stdlib only.
 
-  * gpu_temperature_c() - NVIDIA GPU temperature via `nvidia-smi` (DELL)
+  * gpu_temperature_c() - NVIDIA GPU temperature via `nvidia-smi` (Windows)
   * mac_thermal()       - macOS throttling via `pmset -g therm`
 
 Both readers are best-effort and MUST NEVER RAISE: a missing tool, a timeout

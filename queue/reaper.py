@@ -12,7 +12,7 @@ expiry is decided here, not by the worker.
    queue manager's rolling averages.
 
 STDLIB ONLY. Compose runs this on a bare `python:3.12-slim` with no pip
-install, and worker/macbook_claim.py imports MiniRedis from here, so a
+install, and worker/mac_claim.py imports MiniRedis from here, so a
 third-party import breaks both.
 """
 
@@ -31,7 +31,7 @@ PENDING_KEY = "jobs:pending"
 IN_PROGRESS_KEY = "jobs:in_progress"
 STATS_KEY = "generation:stats"
 LEASE_KEY_PREFIX = "job:lease:"
-LOCAL_WORKERS = ("dell", "macbook_air")
+LOCAL_WORKERS = ("windows", "mac")
 
 DEFAULT_REDIS_URL = "redis://redis:6379/0"  # in-network address on the master
 SCAN_INTERVAL_SEC = int(os.environ.get("REAPER_INTERVAL_SEC", "30"))

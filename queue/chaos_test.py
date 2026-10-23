@@ -105,11 +105,11 @@ def _enqueue_probe(store, label: str) -> str:
 # ---------------------------------------------------------------------------
 
 def scenario_1a_local_only_no_source() -> bool:
-    """1a: local_only, MacBook down, no providers in play. Expect filler_pool.
+    """1a: local_only, Mac down, no providers in play. Expect filler_pool.
 
     Precondition (operator, per DAY15_CHAOS_TESTING.md Section 1a):
       GENERATION_MODE=local_only in .env, queue-manager restarted,
-      MacBook worker process stopped.
+      Mac worker process stopped.
     """
     store = _store()
     item_id = _enqueue_probe(store, "1a-local-only-no-source")
@@ -137,11 +137,11 @@ def scenario_1a_local_only_no_source() -> bool:
 
 
 def scenario_1b_hybrid_no_source() -> bool:
-    """1b: hybrid, MacBook down, no provider keys configured. Expect filler.
+    """1b: hybrid, Mac down, no provider keys configured. Expect filler.
 
     Precondition: GENERATION_MODE=hybrid (or unset with no keys, which
     resolves to local_only — set it explicitly for this test), provider
-    keys commented out, MacBook worker stopped, provider-worker idle.
+    keys commented out, Mac worker stopped, provider-worker idle.
     """
     store = _store()
     item_id = _enqueue_probe(store, "1b-hybrid-no-source")
@@ -162,7 +162,7 @@ def scenario_1c_paid_only_providers_down() -> bool:
     NOT be used (edge case #34 — the deliberate asymmetry with hybrid).
 
     Precondition: GENERATION_MODE=paid_only, provider-worker stopped (or
-    both keys invalid/exhausted), MacBook worker RUNNING and idle.
+    both keys invalid/exhausted), Mac worker RUNNING and idle.
     """
     store = _store()
     item_id = _enqueue_probe(store, "1c-paid-only-providers-down")
@@ -170,7 +170,7 @@ def scenario_1c_paid_only_providers_down() -> bool:
     final = store._one(
         "SELECT status, source_assigned FROM queue_items WHERE id = ?", (item_id,),
     )
-    never_local = not final or final["source_assigned"] not in ("dell", "macbook_air")
+    never_local = not final or final["source_assigned"] not in ("windows", "mac")
     stayed_filler = (final is not None and final["status"] == "queued"
                      and not final["source_assigned"])
     ok = never_local and stayed_filler
@@ -187,7 +187,7 @@ def scenario_2a_hybrid_falls_to_provider() -> bool:
     to filler, when its primary/local tier is unavailable).
 
     Precondition: GENERATION_MODE=hybrid, both provider keys valid,
-    provider-worker running, MacBook worker STOPPED.
+    provider-worker running, Mac worker STOPPED.
     """
     store = _store()
     item_id = _enqueue_probe(store, "2a-hybrid-local-down")
@@ -250,7 +250,7 @@ def scenario_7_lease_requeue() -> bool:
     job_id = str(uuid.uuid4())
     payload = json.dumps({
         "job_id": job_id, "prompt": "chaos-test lease probe",
-        "target_duration_sec": 30, "priority": "live", "worker": "macbook_air",
+        "target_duration_sec": 30, "priority": "live", "worker": "mac",
     })
     # Simulate a worker that claimed a job (moved it to in_progress) but
     # never wrote a lease key and never acked — exactly what a kill -9
@@ -263,7 +263,7 @@ def scenario_7_lease_requeue() -> bool:
     while time.monotonic() < deadline:
         # The reaper polls every REAPER_INTERVAL_SEC (default 30s); give it
         # up to two cycles.
-        on_pending = r.command("LRANGE", "jobs:pending:macbook_air", "0", "-1") or []
+        on_pending = r.command("LRANGE", "jobs:pending:mac", "0", "-1") or []
         if any(job_id in entry for entry in on_pending):
             requeued = True
             break
@@ -274,7 +274,7 @@ def scenario_7_lease_requeue() -> bool:
 
     # Cleanup regardless of outcome — never leave a probe job behind.
     r.command("LREM", "jobs:in_progress", "0", payload)
-    r.command("LREM", "jobs:pending:macbook_air", "0", payload)
+    r.command("LREM", "jobs:pending:mac", "0", payload)
 
     return result(
         "7 unleased in_progress job is requeued by queue-reaper",

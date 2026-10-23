@@ -1,4 +1,4 @@
-"""MANUAL acceptance script for MacBookWorker. NOT a unit test.
+"""MANUAL acceptance script for MacWorker. NOT a unit test.
 
 It performs a REAL generation against a live ACE-Step server, so it must never
 be collected by the test runner — that is why it lives in worker/ and is not
@@ -6,7 +6,7 @@ named test_*.py.
 
 Prerequisite for part 2: the ACE-Step 1.5 API server must be RUNNING first; it
 owns the model (MLX engagement included) and this worker is a thin stdlib
-client. On the MacBook (native, no Docker):
+client. On the Mac (native, no Docker):
 
     cd <path-to>/ACE-Step-1.5
     ./start_api_server_macos.sh        # their launcher: venv + MLX + server
@@ -14,7 +14,7 @@ client. On the MacBook (native, no Docker):
 Wait for its banner (server on :8001). Then, from THIS repo:
 
     cd <ai-roi>/worker
-    python3 acceptance_macbook.py      # system python is fine: this script and
+    python3 acceptance_mac.py      # system python is fine: this script and
                                        # the worker are stdlib-only
 
 What it exercises:
@@ -29,7 +29,7 @@ What it exercises:
 import asyncio
 
 from base import InvalidDurationError, InvalidPromptError
-from macbook_worker import MacBookWorker
+from mac_worker import MacWorker
 
 PROMPT = ("Smooth yacht rock with soft, soulful vocals, groovy basslines, and "
           "lush harmonies. The vibe is easy-going and mellow, perfect for "
@@ -38,7 +38,7 @@ PROMPT = ("Smooth yacht rock with soft, soulful vocals, groovy basslines, and "
 
 def check_malformed_requests() -> None:
     print("== malformed request handling (client-side; server not needed) ==")
-    worker = MacBookWorker()
+    worker = MacWorker()
 
     cases = [
         ("empty prompt", lambda: worker.generate("", 30), InvalidPromptError),
@@ -58,7 +58,7 @@ def check_malformed_requests() -> None:
 
 async def run_real_generation() -> None:
     print("== real generation (API server must be running on :8001) ==")
-    worker = MacBookWorker()
+    worker = MacWorker()
     worker.ensure_server()  # clear, fast failure if the server is down
     result = await worker.generate(PROMPT, 30)
     print(f"  backend        : {result.backend}")
@@ -72,4 +72,4 @@ if __name__ == "__main__":
     check_malformed_requests()
     asyncio.run(run_real_generation())
     print("DONE — play the file, grep the SERVER log for MLX engagement, and")
-    print("record generation_sec next to the DELL baseline.")
+    print("record generation_sec next to the Windows baseline.")

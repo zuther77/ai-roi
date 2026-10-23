@@ -40,7 +40,7 @@ from timing import (
     rolling_average,
 )
 
-WORKERS = ("dell", "macbook_air")
+WORKERS = ("windows", "mac")
 COMPLETED_KEY = "jobs:completed"
 HEARTBEAT_PREFIX = "worker:"
 CANCEL_PREFIX = "job:cancel:"
