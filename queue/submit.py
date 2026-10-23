@@ -1,30 +1,25 @@
-"""Shared prompt-submission pipeline (Day 16 refactor of Days 10-12).
+"""Shared prompt-submission pipeline.
 
-ONE function, submit_prompt(), owns the whole intake sequence:
+submit_prompt() owns the whole intake sequence:
 
     rate-limit  ->  sanitize + validate  ->  moderate  ->  enqueue
 
-Every intake path calls it:
-  * intake.py      - the web form's POST /prompts (operator tool, localhost)
-  * chat_intake.py - YouTube Live Chat `!request <prompt>` (the public path)
+Every intake path calls it — intake.py (the operator web form) and
+chat_intake.py (YouTube Live Chat, the public path). Callers re-implement no
+step; they only translate the returned SubmitResult into their own reply
+channel, so a moderation fix lands in exactly one place.
 
-Callers do NOT re-implement any step. They only translate the returned
-SubmitResult into their own reply channel: an HTTP status + JSON body for the
-form, a chat message for the bot. That is the Day 16 acceptance criterion
-("reuse, don't duplicate"): a moderation fix lands in exactly one place.
-
-Behavior is unchanged from Days 10-12:
+Ordering and failure modes are load-bearing:
   * the rate limiter runs FIRST so a spammer cannot burn moderation API calls,
     and it FAILS OPEN if Redis is down (abuse mitigation, not a safety gate);
   * moderation FAILS CLOSED if its required backend is unreachable (safety
     gate: never enqueue un-screened text);
-  * a rejected prompt is persisted with moderation_status='rejected' and logged
-    with its reason - never a silent drop.
+  * a rejected prompt is persisted with moderation_status='rejected' and
+    logged with its reason — never a silent drop.
 
-`source` is the prompts.source label ("web" | "youtube_chat", design-spec
-Section 4). `rate_key` is who the rate limiter counts against (client IP for
-the form, the chatter's channel id for chat) - kept separate because they are
-different concepts.
+`source` is the prompts.source label ("web" | "youtube_chat"). `rate_key` is
+who the limiter counts against (client IP for the form, the chatter's channel
+id for chat) — kept separate because they are different concepts.
 """
 
 from __future__ import annotations
@@ -35,7 +30,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from moderation import ModerationUnavailable, moderate_prompt
-from ratelimit import MiniRedis, check_rate, retry_after_message
+from ratelimit import MiniRedis, RateDecision, check_rate, retry_after_message
 from store import QueueStore
 
 MAX_PROMPT_CHARS = 1000
@@ -47,8 +42,10 @@ RATE_LIMITED = "rate_limited"
 REJECTED = "rejected"
 UNAVAILABLE = "unavailable"
 
-# Control characters are stripped (a prompt is one line of description).
+# A prompt is one line of description, so control characters are stripped.
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+_ALLOW = RateDecision(allowed=True)
 
 
 def log(event: str, **fields) -> None:
@@ -58,22 +55,17 @@ def log(event: str, **fields) -> None:
 
 
 def sanitize_prompt(text: object) -> str | None:
-    """Normalize submitted text. None when it is not usable text at all.
-
-    Strips control characters and surrounding whitespace. Returns the cleaned
-    string (possibly empty - the caller treats empty as invalid).
-    """
+    """Normalized text, or None when the input is not text at all. The result
+    may be empty, which the caller treats as invalid."""
     if not isinstance(text, str):
         return None
     return _CONTROL_CHARS.sub("", text).strip()
 
 
 def prompt_error(text: object) -> str | None:
-    """None when the text can be enqueued. Otherwise a message for the user.
-
-    Control characters are stripped before the checks, so a prompt made only
-    of control characters reads as empty and is rejected.
-    """
+    """None when the text can be enqueued, otherwise a message for the user.
+    Control characters are stripped first, so a prompt made only of them reads
+    as empty and is rejected."""
     cleaned = sanitize_prompt(text)
     if cleaned is None:
         return "Prompt must be text."
@@ -84,16 +76,8 @@ def prompt_error(text: object) -> str | None:
     return None
 
 
-class _Allow:
-    allowed = True
-    retry_after_sec = 0
-
-
-_ALLOW = _Allow()
-
-
 class RateLimiter:
-    """Lazy, reconnecting, fail-open Redis rate limiter.
+    """Lazy, reconnecting, FAIL-OPEN Redis rate limiter.
 
     A None url (no Redis configured) or any connection failure means "allow":
     the limiter never blocks prompt intake just because Redis is unavailable.
@@ -105,8 +89,7 @@ class RateLimiter:
         self.cooldown_sec = cooldown_sec
         self._redis: MiniRedis | None = None
 
-    def allow(self, source: str):
-        """Return a RateDecision. Fails open to allowed on any Redis trouble."""
+    def allow(self, source: str) -> RateDecision:
         if not self._url:
             return _ALLOW
         try:
@@ -121,7 +104,7 @@ class RateLimiter:
 
 @dataclass(frozen=True)
 class SubmitResult:
-    outcome: str                  # QUEUED | INVALID | RATE_LIMITED | REJECTED | UNAVAILABLE
+    outcome: str                  # one of the module-level outcome constants
     message: str = ""             # specific, user-safe reason (empty when queued)
     category: str = ""            # moderation category when REJECTED
     retry_after_sec: int = 0      # when RATE_LIMITED
@@ -136,9 +119,9 @@ def submit_prompt(store: QueueStore, text: object, *, source: str,
     """Run the full intake pipeline for one submitted prompt.
 
     Does not call a worker. On success the row stays 'queued' until the queue
-    manager assigns it. On any other outcome nothing is enqueued.
+    manager assigns it; on any other outcome nothing is enqueued.
     """
-    # 1. Rate limit first - cheapest, and it must gate the moderation API call.
+    # Rate limit first: cheapest, and it must gate the moderation API call.
     if limiter is not None:
         decision = limiter.allow(rate_key)
         if not decision.allowed:
@@ -150,13 +133,12 @@ def submit_prompt(store: QueueStore, text: object, *, source: str,
                 retry_after_sec=decision.retry_after_sec,
             )
 
-    # 2. Sanitize + validate.
     error = prompt_error(text)
     if error:
         return SubmitResult(INVALID, message=error)
     cleaned = sanitize_prompt(text) or ""
 
-    # 3. Moderate. Fails closed if the required backend is unreachable.
+    # Moderation fails closed: an unreachable backend means do not enqueue.
     try:
         verdict = moderate_prompt(cleaned, env=env, post=post)
     except ModerationUnavailable as exc:
@@ -173,7 +155,6 @@ def submit_prompt(store: QueueStore, text: object, *, source: str,
         return SubmitResult(REJECTED, message=verdict.reason,
                             category=verdict.category)
 
-    # 4. Enqueue.
     item = store.enqueue(cleaned, source=source)
     return SubmitResult(
         QUEUED,

@@ -1,4 +1,4 @@
-"""Day 8 naive worker selection. No Redis, no Postgres."""
+"""Naive worker selection. No Redis, no Postgres."""
 
 import unittest
 

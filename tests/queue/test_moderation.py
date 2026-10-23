@@ -1,5 +1,5 @@
-"""Day 11 moderation unit tests. Pure/no-network: a fake `post` injects
-canned backend responses, so these run anywhere with no API key."""
+"""Moderation unit tests. Pure and offline: a fake `post` injects canned
+backend responses, so these run anywhere with no API key."""
 
 from __future__ import annotations
 

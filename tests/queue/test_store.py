@@ -1,5 +1,5 @@
-"""Day 8 queue store. SQLite stands in for Postgres so the status transitions
-are testable without a database server. The SQL is the same text the Postgres
+"""Queue store. SQLite stands in for Postgres so the status transitions are
+testable without a database server; the SQL is the same text the Postgres
 connection runs."""
 
 import sqlite3

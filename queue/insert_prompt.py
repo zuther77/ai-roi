@@ -1,4 +1,4 @@
-"""Insert one prompt from the shell. The normal path is the Day 10 form.
+"""Insert one prompt from the shell. The normal path is the operator form.
 
     docker compose run --rm queue-manager python /app/queue/insert_prompt.py "lo-fi hip hop"
 """

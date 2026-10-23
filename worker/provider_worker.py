@@ -1,36 +1,26 @@
-"""Day 14 — paid-provider worker (Option B).
+"""Paid-provider worker: makes ElevenLabs / Gemini Lyra participate in the same
+pull-based job protocol as the local workers.
 
-Runs ON THE MASTER by default (the provider API key is already there; no new
-secret exposure — see TRADE_OFF.md). It only makes an HTTPS call and writes a
-file, so it is near-idle and could run on any machine, at the cost of copying
-the key there.
+Runs on the master by default (the provider API key is already there; no new
+secret exposure — see TRADE_OFF.md). Because it speaks the same protocol, the
+queue manager's routing, hedging, lease/reaper and job:cancel handling work
+unchanged whether a backup is a local worker or a provider:
 
-It makes paid providers participate in the EXACT same pull-based job protocol
-as the local workers (dell_worker.py), so the queue manager's routing,
-hedging, lease/reaper, completion-draining, and job:cancel hedge-cancellation
-all work unchanged whether a backup is a local worker or a provider:
+  * claim:     BRPOPLPUSH jobs:pending:<provider> -> jobs:in_progress
+  * lease:     SET job:lease:<job_id> EX <ttl>  (reaper requeues on expiry)
+  * generate:  providers.py, written atomically into the tracks dir
+  * complete:  RPUSH jobs:completed
+  * heartbeat: SETEX worker:<provider> carrying quota_remaining, which the
+               manager's provider_health routing reads
 
-  * claim: BRPOPLPUSH jobs:pending:<provider> -> jobs:in_progress
-  * lease: SET job:lease:<job_id> EX <ttl>  (reaper requeues on expiry)
-  * generate: via worker/providers.py (ElevenLabs / Gemini Lyra), writing the
-    track atomically onto the master's tracks dir (temp-then-rename)
-  * complete: RPUSH jobs:completed {queue_item_id, worker:<provider>, ok, ...}
-  * heartbeat: SETEX worker:<provider> carrying quota_remaining so the
-    manager's provider_health routing has a live quota signal
+One process serves both providers; a provider with no key configured is never
+claimed from, and the process exits cleanly when neither key is set.
 
-ONE process serves both providers by claiming from both pending lists.
-A provider that has no key configured is simply never claimed from.
-
-Which providers this worker serves is auto-detected from the keys present
-(ELEVENLABS_API_KEY / GEMINI_API_KEY); it exits cleanly if neither is set,
-since there is nothing for it to do (a local_only deployment never runs it).
-
-Copyright/quota handling (the reason provider errors are NOT generic):
-  * CopyrightRejected / a validation error -> ack + fail the item, never
-    requeue (a bad prompt will fail identically on retry; looping is waste).
-  * QuotaExhausted -> ack + fail this item AND drop this provider's heartbeat
-    so the manager stops routing to it; the manager's choose_source then
-    falls through (paid_only: ElevenLabs -> Gemini Lyra -> filler).
+Error handling is deliberately not generic:
+  * QuotaExhausted -> ack + fail the item AND drop this provider's heartbeat,
+    so the manager stops routing here and falls through the chain.
+  * CopyrightRejected / validation / config error -> ack WITHOUT requeue: a
+    deterministic failure would fail identically forever.
 """
 
 from __future__ import annotations
@@ -42,8 +32,8 @@ import sys
 import threading
 import time
 from datetime import datetime, timezone
-from urllib.parse import unquote, urlparse
 
+from base import WorkerError, track_stem
 from providers import (
     CopyrightRejected,
     ElevenLabsProvider,
@@ -52,110 +42,30 @@ from providers import (
     ProviderError,
     QuotaExhausted,
 )
-from base import WorkerError, track_stem
+from redis_client import MiniRedis as _MiniRedis, RedisError
 
-COMPLETED_KEY = "jobs:completed"
 IN_PROGRESS_KEY = "jobs:in_progress"
+COMPLETED_KEY = "jobs:completed"
 STATS_KEY = "generation:stats"
 LEASE_KEY_PREFIX = "job:lease:"
 CANCEL_PREFIX = "job:cancel:"
 CLAIM_TIMEOUT_SEC = 5
+HEARTBEAT_SEC = 5
+IDLE_SLEEP_SEC = 0.2
+
 TRACKS_DIR = os.environ.get("TRACKS_DIR", "/srv/radio/tracks")
 DEFAULT_REDIS_URL = "redis://redis:6379/0"
-# Provider calls are fast relative to local generation. A generous fixed
-# lease is fine; the reaper requeues only if the worker dies mid-call.
+# Provider calls are fast relative to local generation, so a generous fixed
+# lease is fine; the reaper only requeues if this worker dies mid-call.
 PROVIDER_LEASE_SEC = int(os.environ.get("PROVIDER_LEASE_SEC", "600"))
-# How often to re-read the live ElevenLabs credit balance (1 cheap GET). Also
-# re-read after every job. Without a readable balance the manager treats the
-# provider as out of credits (design-spec 5.3: unknown == exhausted).
+# How often to re-read the live credit balance (one cheap GET); also re-read
+# after every job. Without a readable balance the manager treats the provider
+# as out of credits.
 QUOTA_REFRESH_SEC = float(os.environ.get("PROVIDER_QUOTA_REFRESH_SEC", "300"))
 
-# name -> factory. Only providers with a key become active.
-PROVIDER_FACTORIES = {
-    "elevenlabs": ElevenLabsProvider,
-    "gemini_lyra": GeminiLyraProvider,
-}
 
-
-class RedisError(Exception):
-    pass
-
-
-class MiniRedis:
-    """The same stdlib RESP2 client the other workers use."""
-
-    def __init__(self, url: str, password: str):
-        parsed = urlparse(url)
-        self.host = parsed.hostname or "redis"
-        self.port = parsed.port or 6379
-        self.db = int((parsed.path or "/0").strip("/") or 0)
-        self.password = unquote(parsed.password) if parsed.password else password
-        self._buf = b""
-        self._sock: socket.socket | None = None
-        self.connect()
-
-    def connect(self) -> None:
-        sock = socket.create_connection((self.host, self.port), timeout=10.0)
-        sock.settimeout(None)
-        self._sock = sock
-        self._buf = b""
-        if self.password:
-            self.command("AUTH", self.password)
-        if self.db:
-            self.command("SELECT", str(self.db))
-        self.command("PING")
-
-    def command(self, *args):
-        assert self._sock is not None
-        self._sock.sendall(self._encode(args))
-        return self._reply()
-
-    @staticmethod
-    def _encode(args) -> bytes:
-        out = [b"*%d\r\n" % len(args)]
-        for a in args:
-            b = str(a).encode("utf-8")
-            out += [b"$%d\r\n" % len(b), b, b"\r\n"]
-        return b"".join(out)
-
-    def _line(self) -> bytes:
-        while b"\r\n" not in self._buf:
-            chunk = self._sock.recv(65536)
-            if not chunk:
-                raise ConnectionError("redis closed the connection")
-            self._buf += chunk
-        line, self._buf = self._buf.split(b"\r\n", 1)
-        return line
-
-    def _exact(self, n: int) -> bytes:
-        while len(self._buf) < n:
-            chunk = self._sock.recv(65536)
-            if not chunk:
-                raise ConnectionError("redis closed the connection")
-            self._buf += chunk
-        data, self._buf = self._buf[:n], self._buf[n:]
-        return data
-
-    def _reply(self):
-        line = self._line()
-        kind = line[:1]
-        if kind == b"+":
-            return line[1:].decode("utf-8")
-        if kind == b"-":
-            raise RedisError(line[1:].decode("utf-8"))
-        if kind == b":":
-            return int(line[1:])
-        if kind == b"$":
-            n = int(line[1:])
-            if n == -1:
-                return None
-            return self._exact(n + 2)[:-2].decode("utf-8")
-        if kind == b"*":
-            n = int(line[1:])
-            if n == -1:
-                return None
-            return [self._reply() for _ in range(n)]
-        raise RedisError("unknown reply type %r" % kind)
+class MiniRedis(_MiniRedis):
+    default_host = "redis"
 
 
 def log(event: str, **fields) -> None:
@@ -175,22 +85,25 @@ def active_providers(env: dict) -> dict:
     return active
 
 
-# What the last quota log said, per provider, so a persistent failure is
-# reported once (then hourly) rather than every refresh.
+# ---------------------------------------------------------------------------
+# Quota tracking
+# ---------------------------------------------------------------------------
+
+# Last logged outcome per provider, so a persistent failure is reported once
+# (then hourly) rather than on every refresh.
 _quota_state: dict = {}
 _QUOTA_REPEAT_SEC = 3600.0
+_quota_wakeup = threading.Event()
 
 
 def refresh_provider_quota(name: str, prov, now: float | None = None) -> None:
-    """Re-read a provider's live balance (if it has one) and LOG THE OUTCOME.
+    """Re-read a provider's live balance (if it has one) and log the outcome.
 
     The first attempt always logs, success or failure, so "no provider_quota
-    line" can never be ambiguous again. After that it logs on a change, and
-    repeats a persistent failure at most hourly.
-
-    A failure is reported even when a seeded/earlier balance exists (the old
-    version stayed silent then): the seed keeps routing alive, but the operator
-    must know the live lookup is not working.
+    line" is never ambiguous. After that it logs on a change and repeats a
+    persistent failure at most hourly. A failure is reported even when a
+    seeded or earlier balance exists: the seed keeps routing alive, but the
+    operator must know the live lookup is broken.
     """
     refresh = getattr(prov, "refresh_quota", None)
     if refresh is None:
@@ -210,7 +123,8 @@ def refresh_provider_quota(name: str, prov, now: float | None = None) -> None:
     error = getattr(prov, "quota_error", "") or "unknown error"
     kept = prov.quota_remaining()  # a seed or an earlier good reading, if any
     kind = "stale" if kept is not None else "unknown"
-    if prev is None or prev[0] != kind or prev[1] != error or now - prev[2] >= _QUOTA_REPEAT_SEC:
+    if (prev is None or prev[0] != kind or prev[1] != error
+            or now - prev[2] >= _QUOTA_REPEAT_SEC):
         if kept is None:
             log("provider_quota_unknown", provider=name, error=error,
                 hint="the manager treats an unknown balance as out of credits and "
@@ -218,45 +132,42 @@ def refresh_provider_quota(name: str, prov, now: float | None = None) -> None:
                      "'user_read' permission, or set ELEVENLABS_CREDIT_BALANCE to "
                      "seed a number.")
         else:
-            log("provider_quota_stale", provider=name, error=error,
-                using=kept,
+            log("provider_quota_stale", provider=name, error=error, using=kept,
                 hint="live balance lookup failed; routing continues on the last "
                      "known/seeded value, which will not reflect credits spent.")
         _quota_state[name] = (kind, error, now)
 
 
-_quota_wakeup = threading.Event()
-
-
 def start_quota_refresher(providers: dict, disabled: set) -> None:
-    """Keep each provider's balance fresh in a thread of its own.
+    """Keep each provider's balance fresh in a thread of its OWN.
 
-    Separate from the heartbeat on purpose: the lookup is a network call that
-    can take seconds (or hang), and the heartbeat has a 20s TTL - sharing a loop
+    Deliberately separate from the heartbeat: the lookup is a network call that
+    can take seconds or hang, and the heartbeat has a 20s TTL — sharing a loop
     let a slow ElevenLabs delay the heartbeat and flap the provider to "down".
-    Refreshes immediately at startup, every QUOTA_REFRESH_SEC, and whenever a
-    job finishes (the event is set by handle_job).
+    Refreshes at startup, every QUOTA_REFRESH_SEC, and whenever a job finishes.
     """
     def loop() -> None:
         while True:
-            for pname, pobj in providers.items():
-                if pname not in disabled:
-                    try:
-                        refresh_provider_quota(pname, pobj)
-                    except Exception as exc:  # never let this thread die
-                        log("provider_quota_error", provider=pname, error=str(exc)[:200])
+            for name, prov in providers.items():
+                if name in disabled:
+                    continue
+                try:
+                    refresh_provider_quota(name, prov)
+                except Exception as exc:  # never let this thread die
+                    log("provider_quota_error", provider=name, error=str(exc)[:200])
             _quota_wakeup.wait(QUOTA_REFRESH_SEC)
             _quota_wakeup.clear()
 
     threading.Thread(target=loop, name="quota-refresh", daemon=True).start()
 
 
-def start_heartbeat(url: str, password: str, providers: dict) -> None:
-    """Publish worker:<provider> with quota_remaining. Own socket: the claim
-    connection blocks in BRPOPLPUSH and cannot be shared.
+def start_heartbeat(url: str, password: str, providers: dict) -> set:
+    """Publish worker:<provider> with quota_remaining; returns the mutable set
+    of disabled providers. Own socket: the claim connection blocks in
+    BRPOPLPUSH and cannot be shared.
 
-    The quota value drives the manager's provider_health. Dropping a
-    heartbeat (quota exhausted) stops the manager routing to that provider.
+    Dropping a heartbeat (quota exhausted) is what stops the manager routing
+    to that provider.
     """
     disabled: set[str] = set()
 
@@ -275,13 +186,15 @@ def start_heartbeat(url: str, password: str, providers: dict) -> None:
                     )
             except Exception:
                 conn = None
-            time.sleep(5)
+            time.sleep(HEARTBEAT_SEC)
 
-    loop.disabled = disabled  # exposed so the claim loop can mark a provider down
-    t = threading.Thread(target=loop, name="provider-heartbeat", daemon=True)
-    t.start()
+    threading.Thread(target=loop, name="provider-heartbeat", daemon=True).start()
     return disabled
 
+
+# ---------------------------------------------------------------------------
+# Redis side of the job protocol
+# ---------------------------------------------------------------------------
 
 def write_lease(r: MiniRedis, job_id, provider: str) -> None:
     r.command("SET", LEASE_KEY_PREFIX + str(job_id),
@@ -326,9 +239,16 @@ def output_path(job: dict, tracks_dir: str | None = None) -> str:
     return os.path.join(tracks_dir or TRACKS_DIR, f"{stem}.mp3")
 
 
+def _fail(r: MiniRedis, job: dict, raw: str, provider: str, error: str) -> None:
+    """Ack, clear the lease and report the item as failed. No requeue."""
+    acknowledge(r, raw)
+    clear_lease(r, job.get("job_id"))
+    push_completed(r, job, provider, "", 0, False, error)
+
+
 def handle_job(r: MiniRedis, provider_name: str, prov, raw: str,
                disabled: set) -> None:
-    """Claim->generate->complete for one provider job. Fail-safe on errors."""
+    """Claim -> generate -> complete for one provider job. Fail-safe on errors."""
     try:
         job = json.loads(raw)
     except json.JSONDecodeError:
@@ -362,9 +282,10 @@ def handle_job(r: MiniRedis, provider_name: str, prov, raw: str,
                        result.generation_sec, True)
         log("job_done", job_id=job_id, provider=provider_name,
             track_path=out_path, generation_sec=result.generation_sec)
-        _quota_wakeup.set()  # re-read the balance without blocking the claim loop
+        _quota_wakeup.set()  # re-read the balance off the claim loop
     except QuotaExhausted as exc:
-        # Fail the item AND stop routing to this provider (drop heartbeat).
+        # Fail the item AND stop routing here: drop the heartbeat (before
+        # reporting the failure) so the manager cannot re-route in between.
         acknowledge(r, raw)
         clear_lease(r, job_id)
         disabled.add(provider_name)
@@ -376,16 +297,12 @@ def handle_job(r: MiniRedis, provider_name: str, prov, raw: str,
         log("provider_quota_exhausted", job_id=job_id, provider=provider_name,
             error=str(exc)[:200])
     except (CopyrightRejected, WorkerError, ProviderConfigError) as exc:
-        # Deterministic failure: never requeue — it fails identically on retry.
-        acknowledge(r, raw)
-        clear_lease(r, job_id)
-        push_completed(r, job, provider_name, "", 0, False, str(exc))
+        # Deterministic failure: never requeue, it fails identically on retry.
+        _fail(r, job, raw, provider_name, str(exc))
         log("job_failed", job_id=job_id, provider=provider_name,
             reason=type(exc).__name__, error=str(exc)[:300])
     except ProviderError as exc:
-        acknowledge(r, raw)
-        clear_lease(r, job_id)
-        push_completed(r, job, provider_name, "", 0, False, str(exc))
+        _fail(r, job, raw, provider_name, str(exc))
         log("job_failed", job_id=job_id, provider=provider_name,
             reason="provider_error", error=str(exc)[:300])
 
@@ -404,7 +321,7 @@ def claim_loop(r: MiniRedis, providers: dict, disabled: set) -> None:
             claimed_any = True
             handle_job(r, name, providers[name], raw, disabled)
         if not claimed_any:
-            time.sleep(0.2)
+            time.sleep(IDLE_SLEEP_SEC)
 
 
 def main() -> int:

@@ -1,19 +1,14 @@
-"""MacBook generation worker — Day 7, on ACE-Step 1.5 (spec-conformant).
+"""MacBook generation worker: the only NATIVE worker.
 
-MacBookWorker(GenerationWorker): the ONLY native worker (design spec
-Section 3.5 runtime: native | container — Docker on Apple Silicon has
-no MLX/GPU passthrough, so containerizing would silently run CPU-only).
+Never containerized: Docker on Apple Silicon has no MLX/GPU passthrough, so a
+container would silently run CPU-only.
 
-Since the ACE-Step 1.5 migration this wraps ACE-Step's OWN REST API
-server — on the Mac that server is started by their
-start_api_server_macos.sh, which handles the entire MLX engagement
-(backend selection, even MLX-version compatibility repair). The worker
-itself carries no model code (stdlib only — it runs fine on the system
-python; the venv belongs to the server) and mirrors the DELL worker's
-architecture exactly: base.py interface + ace_client.py client, with
-GPU/backend attestation happening server-side where the model lives.
-The verified backend line to look for is in the SERVER's startup
-banner/logs, not in this process (README runbook documents the grep).
+This wraps ACE-Step's own REST API server, started on the Mac by their
+start_api_server_macos.sh, which handles the whole MLX engagement (backend
+selection and MLX-version compatibility repair). The worker carries no model
+code and is stdlib-only, so it runs on the system python — the venv belongs to
+the server. Backend attestation is in the SERVER's startup banner, not in this
+process (worker/README.md documents the grep).
 """
 
 from __future__ import annotations
@@ -31,7 +26,6 @@ from base import (AudioResult, GenerationWorker, WorkerError, track_stem,
 WORKER_NAME = "macbook"
 # Their macOS launcher binds the API server on localhost:8001.
 API_URL = os.environ.get("ACESTEP_API_URL", "http://127.0.0.1:8001")
-# Day 7 is isolated: output lands locally (no NFS, no queue, no stream).
 OUTPUT_DIR = os.environ.get("MACBOOK_OUTPUT_DIR", "mac-output")
 
 
@@ -43,13 +37,8 @@ def log(event: str, **fields) -> None:
 
 
 class MacBookWorker(GenerationWorker):
-    """The macOS worker: wraps a running ACE-Step 1.5 API server.
-
-    Construct, call ensure_server() (or let the first generate() do it),
-    then generate(). Backend attestation (MLX vs CPU) lives in the
-    server's own startup banner/logs; this worker reports the server as
-    its backend.
-    """
+    """Construct, call ensure_server() (or let the first generate() do it),
+    then generate()."""
 
     worker_name = WORKER_NAME
 
@@ -58,8 +47,8 @@ class MacBookWorker(GenerationWorker):
         self.backend = "acestep-1.5-api"
 
     def ensure_server(self, timeout_sec: float = 7200.0) -> None:
-        """Block until the API server answers /health. First start
-        includes checkpoint download + model init — stay generous."""
+        """Block until the API server answers /health. First start includes
+        checkpoint download + model init, so the wait stays generous."""
         log("api_wait", api_url=self._client.base_url)
         health = self._client.wait_until_up(timeout_sec=timeout_sec)
         log("api_ready", health=str(health)[:200])
@@ -74,8 +63,8 @@ class MacBookWorker(GenerationWorker):
         prompt, duration_sec = validate_request(prompt, duration_sec)
         self._begin()
         try:
-            # The HTTP submit/poll cycle is blocking I/O; to_thread keeps
-            # the async interface honest.
+            # The HTTP submit/poll cycle is blocking I/O; to_thread keeps the
+            # async interface honest.
             return await asyncio.to_thread(
                 self._generate_sync, prompt, duration_sec, job_id)
         except BaseException:
@@ -101,10 +90,12 @@ class MacBookWorker(GenerationWorker):
         tmp_path = os.path.join(OUTPUT_DIR, stem + ".tmp" + ext)
         final_path = os.path.join(OUTPUT_DIR, stem + ext)
         self._client.fetch_track(item, tmp_path)
-        os.replace(tmp_path, final_path)  # atomic: never a partial file
+        # Atomic: generate to a .tmp name, then replace, so the encoder never
+        # reads a partially written file.
+        os.replace(tmp_path, final_path)
         gen_sec = round(time.monotonic() - t0, 2)
 
-        self._end(gen_sec)  # clears busy, records measured latency
+        self._end(gen_sec)  # clears busy, records the measured latency
         return AudioResult(
             track_path=os.path.abspath(final_path),
             prompt=prompt,

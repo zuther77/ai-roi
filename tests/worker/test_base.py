@@ -1,12 +1,6 @@
-"""Unit tests for the worker interface's pure logic (Day 7, task 4).
+"""Unit tests for the worker interface's pure logic.
 
-Runs anywhere with stdlib python - on the master, in Docker like the
-playout and reaper tests:
-
-    docker compose run --rm --entrypoint "" playout \
-        python -m unittest discover -s /app/playout -p 'test_*.py' -v
-
-or locally from the repo root: python -m unittest worker.test_base -v
+Run from the repo root: ./run_tests.sh worker
 """
 
 import dataclasses

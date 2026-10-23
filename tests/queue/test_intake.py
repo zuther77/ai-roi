@@ -1,7 +1,7 @@
-"""Day 10 intake + Day 11 moderation + Day 12 rate-limit wiring. SQLite stands
-in for Postgres. No worker is called. Fake transports keep these tests offline:
-clean prompts are allowed, and the HTTP tests run with no limiter so Day 10/11
-ordering behavior is preserved. The rate-limit path has its own tests."""
+"""Intake, moderation and rate-limit wiring. SQLite stands in for Postgres and
+no worker is called. Fake transports keep these offline: clean prompts are
+allowed, and the HTTP tests run with no limiter so the sanitize-then-moderate
+ordering is what is under test. The rate-limit path has its own tests."""
 
 from __future__ import annotations
 

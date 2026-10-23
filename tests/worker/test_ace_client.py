@@ -1,12 +1,10 @@
-"""Unit tests for ace_client's pure helpers (Day 7, 1.5 migration).
+"""Unit tests for ace_client's pure helpers.
 
-Regression coverage for the live-verified failure mode: 1.5's terminal
-result embeds a FETCH URL ("/v1/audio?path=...") instead of a bare path,
-and the raw URL used as a path produced HTTP 403 on the Mac (2026-10-04).
+Regression coverage for the live-verified failure mode: a terminal result
+embeds a FETCH URL ("/v1/audio?path=...") instead of a bare path, and the raw
+URL used as a path produced HTTP 403 on the Mac.
 
-Run anywhere with stdlib python:
-
-    cd worker && python3 -m unittest test_ace_client -v
+Run from the repo root: ./run_tests.sh worker
 """
 
 import unittest

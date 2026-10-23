@@ -1,26 +1,16 @@
-"""Formal generation-worker interface — Day 7, task 4 (detailed-plan).
-
-The plan asks for the DELL-era ad-hoc worker shape, now formalized:
+"""Generation-worker interface: the shape both local workers implement.
 
     class GenerationWorker(ABC):
         async def generate(prompt, duration_sec) -> AudioResult
         def is_busy() -> bool
         def avg_latency_sec() -> float
 
-Everything here is deliberately pure and dependency-free (stdlib only), so
-the interface and its validation logic are unit-testable on any machine —
-the master runs worker/test_base.py in CI-style checks without any model
-or GPU, exactly the discipline that made pick_next_track() trustworthy.
+Pure and stdlib-only on purpose, so the interface and its validation logic are
+unit-testable on any machine with no model and no GPU.
 
-Typed exceptions are the Day 7 acceptance criterion "a deliberately
-malformed/oversized request is handled with a clear exception type, not an
-unhandled crash": callers can catch WorkerError subtypes instead of
-whatever the model stack happens to raise.
-
-Timing: avg_latency_sec() is the worker's local rolling average. The
-authoritative cross-worker history lives in the master's
-generation_stats table (Day 6); this local number is for the worker's own
-health/self-assessment ahead of Day 8's Queue Manager.
+avg_latency_sec() is the worker's LOCAL rolling average, for its own health
+self-assessment. The authoritative cross-worker history lives in the master's
+generation_stats table.
 """
 
 from __future__ import annotations
@@ -33,14 +23,18 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-# Request bounds. Prompt moderation is Day 11's job — these are *sanity*
-# limits (reject garbage and oversized input with a typed error), not a
-# moderation policy. Duration bounds reflect what the radio station can
-# plausibly air; nothing here is a generation quality knob.
+# Sanity limits, not a moderation policy (prompt moderation lives in queue/):
+# reject garbage and oversized input with a typed error. The duration bounds
+# are what the radio station can plausibly air.
 MAX_PROMPT_CHARS = 1000
 MIN_DURATION_SEC = 5
 MAX_DURATION_SEC = 300
 LATENCY_WINDOW = 32
+
+# Track file names: "<prompt-slug>-<unique>" so a listing of the tracks dir
+# reads as "rainy-lofi-piano-3fa85f64.mp3" instead of a bare UUID.
+MAX_SLUG_CHARS = 60
+FALLBACK_SLUG = "track"
 
 
 class WorkerError(Exception):
@@ -66,18 +60,17 @@ class AudioResult:
     track_path: str
     prompt: str
     target_duration_sec: float
-    generation_sec: float          # measured, never assumed (spec: workers
-                                   # emit measured time per completed job)
+    generation_sec: float          # measured, never assumed
     worker: str                    # "dell" | "macbook" | ...
     backend: str                   # "cuda" | "mps" | "mlx" | ...
     completed_at: str              # ISO-8601 UTC
 
 
 def validate_request(prompt, duration_sec) -> tuple[str, float]:
-    """Sanity-check a request; returns normalized (prompt, duration).
+    """Sanity-check a request; returns the normalized (prompt, duration).
 
-    Raises InvalidPromptError / InvalidDurationError — the typed handlers
-    the acceptance criterion asks for. Pure function, unit-tested.
+    Raises InvalidPromptError / InvalidDurationError so a malformed or
+    oversized request is a typed error, never an unhandled crash. Pure.
     """
     if not isinstance(prompt, str):
         raise InvalidPromptError(f"prompt must be a string, got {type(prompt).__name__}")
@@ -88,8 +81,8 @@ def validate_request(prompt, duration_sec) -> tuple[str, float]:
         raise InvalidPromptError(
             f"prompt is {len(prompt)} chars; max is {MAX_PROMPT_CHARS}")
 
-    # bool is an int subclass — reject it explicitly rather than let
-    # `True` pass as "1 second".
+    # bool is an int subclass: reject it explicitly rather than let `True`
+    # pass as "1 second".
     if isinstance(duration_sec, bool) or not isinstance(duration_sec, (int, float)):
         raise InvalidDurationError(
             f"duration must be a number, got {type(duration_sec).__name__}")
@@ -101,22 +94,14 @@ def validate_request(prompt, duration_sec) -> tuple[str, float]:
     return prompt, float(duration_sec)
 
 
-# Track file names: "<prompt-slug>-<unique>" so a listing of the tracks dir is
-# readable ("rainy-lofi-piano-3fa85f64.mp3") instead of a bare UUID/timestamp.
-MAX_SLUG_CHARS = 60
-FALLBACK_SLUG = "track"
-
-
 def slugify(text: object, max_chars: int = MAX_SLUG_CHARS) -> str:
-    """Filename-safe slug of a prompt: lowercase ASCII letters/digits joined by
-    single hyphens, cut to max_chars. Pure.
+    """Filename-safe slug: lowercase ASCII letters/digits joined by single
+    hyphens, cut to max_chars. Pure.
 
-    Anything else (punctuation, '/', '..', control characters, emoji, CJK) is
-    dropped or becomes a separator, so a prompt can never produce a path
+    Restricted to [a-z0-9-] so a hostile prompt can never produce a path
     separator, a dotfile, or a name that differs only by case (macOS is
-    case-insensitive, Linux is not). A prompt with nothing representable
-    (e.g. only non-Latin text) falls back to "track" - the unique suffix still
-    keeps the file identifiable.
+    case-insensitive, Linux is not). A prompt with nothing representable falls
+    back to "track"; the unique suffix still keeps the file identifiable.
     """
     if not isinstance(text, str):
         return FALLBACK_SLUG
@@ -129,9 +114,9 @@ def slugify(text: object, max_chars: int = MAX_SLUG_CHARS) -> str:
 def track_stem(prompt: object, unique: object = None) -> str:
     """File stem (no extension) for a generated track: '<slug>-<unique8>'.
 
-    `unique` is normally the job id, so two identical prompts - or the two
-    sides of a hedged item - never collide. Without one, a UTC timestamp is
-    used. Pure apart from reading the clock in that fallback.
+    `unique` is normally the job id, so two identical prompts — or the two
+    sides of a hedged item — never overwrite each other. Without one, a UTC
+    timestamp is used.
     """
     token = re.sub(r"[^A-Za-z0-9]", "", str(unique or ""))[:8].lower()
     if not token:
@@ -140,8 +125,8 @@ def track_stem(prompt: object, unique: object = None) -> str:
 
 
 class LatencyTracker:
-    """Rolling window of measured generation times. Pure, thread-safe
-    enough for this project's one-generation-at-a-time workers."""
+    """Rolling window of measured generation times. Thread-safe enough for
+    this project's one-generation-at-a-time workers."""
 
     def __init__(self, window: int = LATENCY_WINDOW):
         self._samples: deque[float] = deque(maxlen=window)
@@ -156,10 +141,8 @@ class LatencyTracker:
 
 
 class GenerationWorker(ABC):
-    """The interface both workers implement. DELL's Sprint 2 worker was
-    this shape informally; Day 8's Queue Manager programs against exactly
-    this abstraction so it never needs to know runtime: native | container
-    (design spec Section 3.5's deliberate asymmetry)."""
+    """The interface both local workers implement, so the queue manager never
+    needs to know whether a worker runs native or in a container."""
 
     worker_name: str = "abstract"
 
@@ -169,9 +152,9 @@ class GenerationWorker(ABC):
     @abstractmethod
     async def generate(self, prompt: str, duration_sec: int,
                        job_id: str | None = None) -> AudioResult:
-        """Generate one track. Must validate the request first (typed
-        errors, never an unhandled crash) and report the measured time.
-        `job_id` (optional) only feeds the output file name (track_stem)."""
+        """Generate one track. Must validate the request first (typed errors,
+        never an unhandled crash) and report the measured time. `job_id` only
+        feeds the output file name (track_stem)."""
 
     @abstractmethod
     def is_busy(self) -> bool:
@@ -179,11 +162,11 @@ class GenerationWorker(ABC):
         single-generation-at-a-time by design)."""
 
     def avg_latency_sec(self) -> float:
-        """Rolling average of recent completed generations; 0.0 before
-        the first completion. Measured values only."""
+        """Rolling average of recent completed generations; 0.0 before the
+        first completion. Measured values only."""
         return self._latency.avg_sec() or 0.0
 
-    # -- shared helpers for concrete workers ----------------------------
+    # -- shared helpers for concrete workers --------------------------------
     def _begin(self) -> None:
         self._busy = True
 
@@ -194,14 +177,3 @@ class GenerationWorker(ABC):
     @staticmethod
     def _now_iso() -> str:
         return datetime.now(timezone.utc).isoformat()
-
-
-class T0:
-    """Wall-clock timer context manager producing measured seconds."""
-
-    def __enter__(self) -> "T0":
-        self.start = time.monotonic()
-        return self
-
-    def __exit__(self, *exc) -> None:
-        self.elapsed = time.monotonic() - self.start

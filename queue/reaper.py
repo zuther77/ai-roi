@@ -1,33 +1,19 @@
-"""Queue reaper — Day 6 (detailed-plan Day 6, tasks 1 and 3).
+"""Queue reaper: lease enforcement and generation-stats recording.
 
-Runs ON THE MASTER as a Compose service, deliberately independent of the
-DELL link: a worker that dies or gets unplugged mid-job cannot cause a job
-to be stuck in jobs:in_progress forever, because lease expiry is decided
-here, not by the worker.
+Runs on the master as a Compose service, independent of the workers, so a
+worker that dies mid-job cannot leave a job stuck in jobs:in_progress: lease
+expiry is decided here, not by the worker.
 
-Two duties, one small process:
+1. Lease enforcement. The worker writes job:lease:<job_id> when it claims a
+   job and deletes it on ack. reap_expired() requeues every jobs:in_progress
+   entry whose lease key is gone.
+2. Stats. Workers RPUSH completed-job timings to generation:stats;
+   drain_stats() moves them into a master-local SQLite table that feeds the
+   queue manager's rolling averages.
 
-1. Lease enforcement. The worker writes a lease key
-   (job:lease:<job_id>, TTL = expected_duration x 3) when it claims a job
-   and deletes it when it acks. This loop scans jobs:in_progress and
-   requeues every job whose lease key no longer exists (TTL expired).
-   Order matters for the race against a worker acking at that same moment:
-   LREM first, and only requeue if the LREM actually removed the entry —
-   if the worker already acked, the entry is gone and must NOT be queued
-   twice. The reverse order could double-queue a job that just finished.
-
-2. generation_stats recording. Workers RPUSH completed-job timing rows to
-   the generation:stats list; this loop drains it into a master-local
-   SQLite table. The table (not a worker-side DB file on NFS - SQLite
-   locking over NFS is unreliable) becomes the rolling-average source for
-   the Day 9 queue-manager timing math.
-
-The plan's pitfall list requires this to be part of the Compose stack with
-restart: always — never a one-off script someone must remember to run.
-
-Owns a private copy of the Day 4 RESP client: the worker is deliberately a
-single self-contained file, and deduplicating these ~80 lines is Day 8
-Queue Manager work, not today's.
+STDLIB ONLY. Compose runs this on a bare `python:3.12-slim` with no pip
+install, and worker/macbook_claim.py imports MiniRedis from here, so a
+third-party import breaks both.
 """
 
 from __future__ import annotations
@@ -45,10 +31,13 @@ PENDING_KEY = "jobs:pending"
 IN_PROGRESS_KEY = "jobs:in_progress"
 STATS_KEY = "generation:stats"
 LEASE_KEY_PREFIX = "job:lease:"
+LOCAL_WORKERS = ("dell", "macbook_air")
 
 DEFAULT_REDIS_URL = "redis://redis:6379/0"  # in-network address on the master
 SCAN_INTERVAL_SEC = int(os.environ.get("REAPER_INTERVAL_SEC", "30"))
 STATS_DB = os.environ.get("STATS_DB", "/app/queue/generation_stats.db")
+
+RECV_CHUNK = 65536
 
 
 class RedisError(Exception):
@@ -56,7 +45,8 @@ class RedisError(Exception):
 
 
 class MiniRedis:
-    """Same ~100-line RESP2 client the worker uses (see module docstring)."""
+    """Minimal RESP2 client. Shared by the other queue services and the
+    workers, so it must stay dependency-free (see the module docstring)."""
 
     def __init__(self, url: str, password: str):
         parsed = urlparse(url)
@@ -87,48 +77,44 @@ class MiniRedis:
     @staticmethod
     def _encode(args) -> bytes:
         out = [b"*%d\r\n" % len(args)]
-        for a in args:
-            b = str(a).encode("utf-8")
-            out += [b"$%d\r\n" % len(b), b, b"\r\n"]
+        for arg in args:
+            raw = str(arg).encode("utf-8")
+            out += [b"$%d\r\n" % len(raw), raw, b"\r\n"]
         return b"".join(out)
+
+    def _recv_more(self) -> None:
+        chunk = self._sock.recv(RECV_CHUNK)
+        if not chunk:
+            raise ConnectionError("redis closed the connection")
+        self._buf += chunk
 
     def _line(self) -> bytes:
         while b"\r\n" not in self._buf:
-            chunk = self._sock.recv(65536)
-            if not chunk:
-                raise ConnectionError("redis closed the connection")
-            self._buf += chunk
+            self._recv_more()
         line, self._buf = self._buf.split(b"\r\n", 1)
         return line
 
     def _exact(self, n: int) -> bytes:
         while len(self._buf) < n:
-            chunk = self._sock.recv(65536)
-            if not chunk:
-                raise ConnectionError("redis closed the connection")
-            self._buf += chunk
+            self._recv_more()
         data, self._buf = self._buf[:n], self._buf[n:]
         return data
 
     def _reply(self):
         line = self._line()
-        kind = line[:1]
+        kind, body = line[:1], line[1:]
         if kind == b"+":
-            return line[1:].decode("utf-8")
+            return body.decode("utf-8")
         if kind == b"-":
-            raise RedisError(line[1:].decode("utf-8"))
+            raise RedisError(body.decode("utf-8"))
         if kind == b":":
-            return int(line[1:])
+            return int(body)
         if kind == b"$":
-            n = int(line[1:])
-            if n == -1:
-                return None
-            return self._exact(n + 2)[:-2].decode("utf-8")
+            n = int(body)
+            return None if n == -1 else self._exact(n + 2)[:-2].decode("utf-8")
         if kind == b"*":
-            n = int(line[1:])
-            if n == -1:
-                return None
-            return [self._reply() for _ in range(n)]
+            n = int(body)
+            return None if n == -1 else [self._reply() for _ in range(n)]
         raise RedisError("unknown reply type %r" % kind)
 
 
@@ -143,25 +129,30 @@ def log(event: str, **fields) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Pure decision helpers — unit-tested in test_reaper.py
+# Pure decision helpers
 # ---------------------------------------------------------------------------
 
-def parse_job_id(raw: str) -> str | None:
-    """Best-effort job_id extraction from a queue element. Returns None for
-    anything that is not a JSON object with a usable job_id."""
+def _job_object(raw: str) -> dict | None:
+    """Parse a queue element into a job dict, or None if it is not one."""
     try:
         job = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
         return None
-    if not isinstance(job, dict):
+    return job if isinstance(job, dict) else None
+
+
+def parse_job_id(raw: str) -> str | None:
+    """Best-effort job_id from a queue element, else None."""
+    job = _job_object(raw)
+    if job is None:
         return None
     job_id = job.get("job_id")
     return str(job_id) if job_id is not None else None
 
 
 def lease_key(job_id: str | None) -> str:
-    """Redis key holding a claim's lease. A None job_id (unparseable entry)
-    maps to a key that will never exist, so the entry reads as expired."""
+    """A None job_id (unparseable entry) maps to a key no worker ever sets, so
+    the entry reads as expired and gets requeued for the worker to reject."""
     return LEASE_KEY_PREFIX + (str(job_id) if job_id is not None else "")
 
 
@@ -171,26 +162,15 @@ def decide_requeue(lease_exists: bool) -> bool:
 
 
 def pending_list_for(raw: str) -> str:
-    """Day 8: requeue onto the list of the worker that owned the job.
-
-    Jobs with no worker field (Day 4-6) stay on jobs:pending.
-    """
-    try:
-        job = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return PENDING_KEY
-    if not isinstance(job, dict):
-        return PENDING_KEY
-    worker = job.get("worker")
-    if worker in ("dell", "macbook_air"):
-        return f"jobs:pending:{worker}"
-    return PENDING_KEY
+    """Requeue onto the owning worker's list. Jobs with no worker field
+    predate per-worker lists and stay on jobs:pending."""
+    job = _job_object(raw)
+    worker = job.get("worker") if job else None
+    return f"jobs:pending:{worker}" if worker in LOCAL_WORKERS else PENDING_KEY
 
 
 def stats_row(raw: str) -> tuple:
-    """Validate + normalize one generation:stats element into a SQLite row
-    (job_id, worker, generation_time_sec, target_duration_sec, completed_at).
-    Raises ValueError on anything malformed."""
+    """One generation:stats element as a SQLite row. Raises on malformed input."""
     row = json.loads(raw)
     if not isinstance(row, dict):
         raise ValueError("stats row is not an object")
@@ -204,7 +184,7 @@ def stats_row(raw: str) -> tuple:
 
 
 # ---------------------------------------------------------------------------
-# SQLite (master-local; never on NFS - locking over NFS is unreliable)
+# SQLite — master-local on purpose: SQLite locking over NFS is unreliable
 # ---------------------------------------------------------------------------
 
 def open_stats_db(path: str) -> sqlite3.Connection:
@@ -231,8 +211,8 @@ def open_stats_db(path: str) -> sqlite3.Connection:
 
 def drain_stats(r: MiniRedis, conn: sqlite3.Connection) -> int:
     """Move all pending generation:stats elements into SQLite. RPOP is
-    destructive, so a crash mid-drain loses at most the one row in flight —
-    acceptable for stats, and it can never double-insert."""
+    destructive, so a crash mid-drain loses at most the row in flight and can
+    never double-insert — acceptable for stats."""
     written = 0
     while True:
         raw = r.command("RPOP", STATS_KEY)
@@ -261,9 +241,10 @@ def reap_expired(r: MiniRedis) -> int:
         exists = r.command("EXISTS", lease_key(job_id))
         if not decide_requeue(bool(exists)):
             continue
-        # LREM first: only requeue if WE removed it. If a worker acked in
-        # the same instant, its LREM already won and this returns 0 — then
-        # the job is complete and must NOT go back on jobs:pending.
+        # LREM BEFORE RPUSH, and requeue only if the LREM removed the entry.
+        # A worker acking at this same instant already won with its own LREM,
+        # which returns 0 here — that job is complete and must NOT be queued
+        # twice. The reverse order would double-queue it.
         removed = r.command("LREM", IN_PROGRESS_KEY, "1", raw)
         if removed == 1:
             pending = pending_list_for(raw)

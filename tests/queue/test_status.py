@@ -1,11 +1,10 @@
-"""Day 17 status dashboard tests. Offline: SQLite store, fake Redis, temp files."""
+"""Status dashboard tests. Offline: SQLite store, fake Redis, temp files."""
 
 from __future__ import annotations
 
 import json
 import os
 import sqlite3
-import sys
 import tempfile
 import threading
 import unittest
@@ -103,7 +102,9 @@ class FfmpegLogTest(unittest.TestCase):
         self.assertEqual(status.last_ffmpeg_start([self.line("track_start", "t")]), (None, 0))
 
     def test_ignores_garbage_lines(self):
-        self.assertEqual(status.last_ffmpeg_start(["not json", "", '{"ffmpeg_started": 1}']), (None, 0))
+        self.assertEqual(
+            status.last_ffmpeg_start(["not json", "", '{"ffmpeg_started": 1}']),
+            (None, 0))
 
     def test_stream_section_uses_a_real_log_file(self):
         with tempfile.TemporaryDirectory() as d:
@@ -154,7 +155,8 @@ class QueueAndModerationTest(unittest.TestCase):
             self.add(st, "macbook_air" if st != "queued" else None)
         q = status.collect_queue(self.store)
         direct = self.store._one(
-            "SELECT COUNT(*) AS n FROM queue_items WHERE status IN ('queued','generating','ready')")["n"]
+            "SELECT COUNT(*) AS n FROM queue_items"
+            " WHERE status IN ('queued','generating','ready')")["n"]
         self.assertEqual(q["depth"], direct)
         self.assertEqual(q["depth"], 4)
         self.assertEqual(q["by_status"]["played"], 1)
@@ -188,7 +190,9 @@ class QueueAndModerationTest(unittest.TestCase):
         self.assertTrue(status.collect_moderation(self.store, datetime.now(timezone.utc))["warn"])
 
     def test_failure_rate_is_per_source_from_the_queue_table(self):
-        self.add("failed", "macbook_air"); self.add("played", "macbook_air"); self.add("played", "macbook_air")
+        self.add("failed", "macbook_air")
+        self.add("played", "macbook_air")
+        self.add("played", "macbook_air")
         self.add("ready", "elevenlabs")
         self.add("generating", "macbook_air")               # not finished: excluded
         f = status.collect_failures(self.store, datetime.now(timezone.utc))["by_source"]
@@ -196,7 +200,8 @@ class QueueAndModerationTest(unittest.TestCase):
         self.assertEqual(f["elevenlabs"]["rate"], 0.0)
 
     def test_prompt_text_never_appears_in_any_section(self):
-        self.store.enqueue("SECRET-PROMPT-TEXT"); self.store.record_rejected_prompt("SECRET-REJECTED")
+        self.store.enqueue("SECRET-PROMPT-TEXT")
+        self.store.record_rejected_prompt("SECRET-REJECTED")
         blob = json.dumps([status.collect_queue(self.store),
                            status.collect_moderation(self.store, datetime.now(timezone.utc)),
                            status.collect_failures(self.store, datetime.now(timezone.utc))])
@@ -265,8 +270,10 @@ class OverallLevelTest(unittest.TestCase):
     def test_levels(self):
         self.assertEqual(status.overall_level({"stream": {"state": "up"}, "queue": {}}), "ok")
         self.assertEqual(status.overall_level({"stream": {"state": "down"}}), "down")
-        self.assertEqual(status.overall_level({"stream": {"state": "up"}, "workers": {"error": "x"}}), "warn")
-        self.assertEqual(status.overall_level({"stream": {"state": "up"}, "queue": {"warn": True}}), "warn")
+        self.assertEqual(status.overall_level(
+            {"stream": {"state": "up"}, "workers": {"error": "x"}}), "warn")
+        self.assertEqual(status.overall_level(
+            {"stream": {"state": "up"}, "queue": {"warn": True}}), "warn")
 
 
 class CollectorAndHttpTest(unittest.TestCase):
@@ -308,7 +315,8 @@ class CollectorAndHttpTest(unittest.TestCase):
             calls["n"] += 1
             if calls["n"] == 1:
                 raise ConnectionError("down")
-            return FakeRedis(kv={"worker:macbook_air": '{"busy": false}'}, ttls={"worker:macbook_air": 20})
+            return FakeRedis(kv={"worker:macbook_air": '{"busy": false}'},
+                             ttls={"worker:macbook_air": 20})
 
         c = self.collector(redis_factory=flaky)
         status.CACHE_TTL_SEC, saved = 0.0, status.CACHE_TTL_SEC
@@ -357,13 +365,15 @@ def ev(event, ts, **kw):
 
 class TitleTest(unittest.TestCase):
     def test_generated_names_lose_extension_and_id(self):
-        self.assertEqual(status.title_from_filename("rainy-lofi-piano-3fa85f64.mp3"), "Rainy lofi piano")
+        self.assertEqual(status.title_from_filename("rainy-lofi-piano-3fa85f64.mp3"),
+                         "Rainy lofi piano")
 
     def test_timestamp_suffix_is_removed_too(self):
         self.assertEqual(status.title_from_filename("lofi-beat-20261021t003938.mp3"), "Lofi beat")
 
     def test_filler_names_only_get_cleaned_up(self):
-        self.assertEqual(status.title_from_filename("Chill_Lofi_Beats_03.mp3"), "Chill Lofi Beats 03")
+        self.assertEqual(status.title_from_filename("Chill_Lofi_Beats_03.mp3"),
+                         "Chill Lofi Beats 03")
 
     def test_a_name_that_is_all_suffix_still_returns_something(self):
         self.assertTrue(status.title_from_filename("track-3fa85f64.mp3"))
@@ -508,7 +518,8 @@ class LongLogRegressionTest(unittest.TestCase):
     def test_uptime_survives_log_rotation(self):
         with tempfile.TemporaryDirectory() as d:
             cur = Path(d) / "playout.jsonl"
-            Path(d, "playout.jsonl.1").write_text(ev("ffmpeg_started", NOW - timedelta(hours=70)) + "\n")
+            Path(d, "playout.jsonl.1").write_text(
+                ev("ffmpeg_started", NOW - timedelta(hours=70)) + "\n")
             cur.write_text(ev("track_start", NOW, track="a-11111111.mp3", duration_sec=90) + "\n")
             s = status.collect_stream(NOW, cur)
         self.assertEqual(s["state"], "up")
@@ -557,15 +568,18 @@ class NowPlayingPageTest(unittest.TestCase):
         node = shutil.which("node")
         if not node:
             self.skipTest("node not installed")
-        data["now_playing"] = {"state": "playing", "title": "Afro phonk 140 bpm", "file": "afro-4b5e8576.mp3",
-                               "kind": "generated", "source": "elevenlabs", "elapsed_sec": 72, "duration_sec": 180}
+        data["now_playing"] = {
+            "state": "playing", "title": "Afro phonk 140 bpm",
+            "file": "afro-4b5e8576.mp3", "kind": "generated",
+            "source": "elevenlabs", "elapsed_sec": 72, "duration_sec": 180}
         script = re.search(r"<script>(.*)</script>", status.PAGE, re.S).group(1)
         script = script.replace("tick();setInterval(tick,5000);", "")
         js = ("const els={};global.document={getElementById:id=>els[id]||(els[id]={className:'',textContent:'',innerHTML:''})};\n"
               + script + "\nrender(" + json.dumps(data, default=str) + ");\nconsole.log(els.out.innerHTML);")
         out = subprocess.run([node, "-e", js], capture_output=True, text=True)
         self.assertEqual(out.returncode, 0, out.stderr)
-        for expected in ("Afro phonk 140 bpm", "generated by elevenlabs", "1:12 / 3:00", "afro-4b5e8576.mp3"):
+        for expected in ("Afro phonk 140 bpm", "generated by elevenlabs",
+                         "1:12 / 3:00", "afro-4b5e8576.mp3"):
             self.assertIn(expected, out.stdout)
 
 

@@ -1,14 +1,14 @@
-"""Optional hardware telemetry for worker heartbeats (Day 17).
+"""Optional hardware telemetry for worker heartbeats. Stdlib only.
 
-Both readers are best-effort: if the tool is missing, times out, or prints
-something unexpected they return None and the dashboard simply shows no value.
-They never raise - a sensor problem must not affect job claiming or the
-heartbeat that the manager's routing depends on. stdlib only.
+  * gpu_temperature_c() - NVIDIA GPU temperature via `nvidia-smi` (DELL)
+  * mac_thermal()       - macOS throttling via `pmset -g therm`
 
-  * gpu_temperature_c()  - NVIDIA GPU temperature via `nvidia-smi` (DELL)
-  * mac_thermal()        - macOS thermal/performance throttling via `pmset -g therm`
+Both readers are best-effort and MUST NEVER RAISE: a missing tool, a timeout
+or unexpected output returns None and the dashboard simply shows no value. A
+sensor problem must not affect job claiming or the heartbeat the manager's
+routing depends on.
 
-The parsers are separate pure functions so they are unit-tested against sample
+The parsers are separate pure functions so they unit-test against sample
 output; the subprocess wrappers are thin.
 """
 
@@ -33,10 +33,10 @@ def parse_nvidia_smi_temp(output: str) -> int | None:
 def parse_pmset_therm(output: str) -> str | None:
     """Summarize `pmset -g therm` as 'ok' | 'throttled (NN%)' | 'warning'. Pure.
 
-    When macOS has recorded a limit it prints key = value lines such as
-    CPU_Speed_Limit = 100 (percent of full speed; below 100 means throttled).
-    With nothing recorded it prints only 'Note: No ... has been recorded' lines.
-    Returns None if the text matches neither shape (unknown, not 'ok').
+    When macOS has recorded a limit it prints `CPU_Speed_Limit = 100` (percent
+    of full speed; below 100 means throttled). With nothing recorded it prints
+    only 'Note: No ... has been recorded' lines. Returns None if the text
+    matches neither shape — unknown, not 'ok'.
     """
     text = output or ""
     limits = [int(m) for m in re.findall(r"CPU_Speed_Limit\s*=\s*(\d+)", text)]
@@ -44,8 +44,8 @@ def parse_pmset_therm(output: str) -> str | None:
         low = min(limits)
         return "ok" if low >= 100 else f"throttled ({low}%)"
     if re.search(r"warning level", text, re.IGNORECASE):
-        # "No thermal warning level has been recorded" is the all-clear case;
-        # any other mention of a warning level means one was recorded.
+        # "No thermal warning level has been recorded" is the all-clear; any
+        # other mention of a warning level means one was recorded.
         if re.search(r"No (thermal|performance) warning level has been recorded", text) \
                 and not re.search(r"(?<!No )(thermal|performance) warning level.*(\d+)", text):
             return "ok"
@@ -75,14 +75,15 @@ class Cached:
         if self._at is None or now - self._at >= self._ttl:
             try:
                 self._value = self._fn()
-            except Exception:
+            except Exception:  # best-effort: a sensor must never break a beat
                 self._value = None
             self._at = now
         return self._value
 
 
 def gpu_temperature_c() -> int | None:
-    out = _run(["nvidia-smi", "--query-gpu=temperature.gpu", "--format=csv,noheader,nounits"])
+    out = _run(["nvidia-smi", "--query-gpu=temperature.gpu",
+                "--format=csv,noheader,nounits"])
     return parse_nvidia_smi_temp(out) if out else None
 
 

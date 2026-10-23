@@ -1,5 +1,5 @@
-"""Day 12 rate-limit unit tests. A fake Redis makes these offline and
-deterministic — no server, no clock dependence."""
+"""Rate-limit unit tests. A fake Redis makes these offline and deterministic —
+no server, no clock dependence."""
 
 from __future__ import annotations
 

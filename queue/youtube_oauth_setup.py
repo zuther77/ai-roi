@@ -1,9 +1,10 @@
 """One-time helper: get the OAuth refresh token that enables chat replies.
 
 Chat replies ("@name Queued at position 3.") are optional. Reading chat needs
-only an API key, but POSTING to chat needs OAuth, and the bot needs a long-lived
-refresh token for the account that should post. This script obtains it with
-Google's OAuth device flow - no redirect server, works over SSH on the master.
+only an API key, but POSTING to chat needs OAuth, and the bot needs a
+long-lived refresh token for the account that should post. This script obtains
+it with Google's OAuth device flow — no redirect server, so it works over SSH
+on the master.
 
 Run it ONCE, anywhere with internet (it does not need Docker or the stack):
 
@@ -22,10 +23,10 @@ Before running, in the Google Cloud console (same project as your API key):
 
 The script prints a short code and a URL. Open the URL on any device, sign in
 as the account that should post replies (it posts as that account), enter the
-code, and approve. The script then prints three lines for your .env. It does
-NOT write .env for you, so nothing secret is saved without your say-so.
+code, and approve. It then prints three lines for your .env. It does NOT write
+.env for you, so nothing secret is saved without your say-so.
 
-Scope: https://www.googleapis.com/auth/youtube - supported by the device flow
+Scope: https://www.googleapis.com/auth/youtube — supported by the device flow
 and accepted by liveChatMessages.insert.
 """
 
@@ -69,7 +70,8 @@ def interpret_token_response(status: int, body: dict) -> tuple[str, str]:
         token = body.get("refresh_token")
         if token:
             return "done", token
-        return "fail", "no refresh_token returned (was the app already authorized? revoke and retry)"
+        return "fail", ("no refresh_token returned (was the app already "
+                        "authorized? revoke and retry)")
     error = body.get("error", "")
     if error == "authorization_pending":
         return "wait", ""

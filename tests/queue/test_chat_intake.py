@@ -1,5 +1,5 @@
-"""Day 16 chat intake tests. Fully offline: fake YouTube transport, fake
-moderation transport, SQLite store. No API key, no network, no quota."""
+"""Chat intake tests. Fully offline: fake YouTube transport, fake moderation
+transport, SQLite store. No API key, no network, no quota."""
 
 from __future__ import annotations
 
@@ -359,7 +359,9 @@ class ReplierTest(unittest.TestCase):
 
 class ResolveChatIdTest(unittest.TestCase):
     def test_returns_active_chat_id(self):
-        get = lambda path, params: {"items": [{"liveStreamingDetails": {"activeLiveChatId": "CHAT"}}]}
+        def get(path, params):
+            return {"items": [{"liveStreamingDetails":
+                               {"activeLiveChatId": "CHAT"}}]}
         self.assertEqual(ci.resolve_live_chat_id("k", "vid", get), "CHAT")
 
     def test_none_when_not_live(self):
@@ -393,7 +395,9 @@ class OAuthSetupTest(unittest.TestCase):
     def test_polling_states(self):
         import youtube_oauth_setup as s
         self.assertEqual(s.interpret_token_response(200, {"refresh_token": "RT"}), ("done", "RT"))
-        self.assertEqual(s.interpret_token_response(428, {"error": "authorization_pending"})[0], "wait")
+        self.assertEqual(
+            s.interpret_token_response(428, {"error": "authorization_pending"})[0],
+            "wait")
         self.assertEqual(s.interpret_token_response(403, {"error": "slow_down"})[0], "slow")
         self.assertEqual(s.interpret_token_response(403, {"error": "access_denied"})[0], "fail")
         self.assertEqual(s.interpret_token_response(400, {"error": "expired_token"})[0], "fail")

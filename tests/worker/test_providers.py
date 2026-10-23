@@ -1,6 +1,9 @@
-"""Day 13 provider unit tests. A fake transport makes these offline: no key,
-no network, no paid call. Covers request shape, audio parsing, typed-error
-classification, quota behavior, lazy construction, and paid_only fail-loud."""
+"""Provider unit tests. A fake transport makes these offline: no key, no
+network, no paid call. Covers request shape, audio parsing, typed-error
+classification, quota behavior, lazy construction, and paid_only fail-loud.
+
+Run from the repo root: ./run_tests.sh worker
+"""
 
 from __future__ import annotations
 

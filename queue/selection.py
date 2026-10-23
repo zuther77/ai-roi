@@ -1,15 +1,14 @@
-"""Naive worker choice. Idle and healthy wins; otherwise alternate.
+"""Naive worker choice: idle and healthy wins, otherwise alternate.
 
-Day 9's live path is timing.plan_assignment. This function stays so each
-assignment can log what the naive rule would have picked. A worker with
-no heartbeat is unhealthy (DELL stays parked until it publishes one).
+The live path is timing.plan_assignment; this stays so each assignment can log
+what the naive rule would have picked. A worker with no heartbeat is unhealthy.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-# Spec names. Order is the tie-break when nothing has been assigned yet.
+# Order is the tie-break when nothing has been assigned yet.
 CANONICAL = ("dell", "macbook_air")
 
 
@@ -21,10 +20,10 @@ class WorkerState:
 
 
 def choose_worker(states: list[WorkerState], last_assigned: str | None) -> str | None:
-    """Return the worker that should take the next queued item, or None.
+    """The worker that should take the next queued item, or None.
 
-    None means every healthy worker is busy, or none are up. The caller
-    leaves the item queued and plays filler in the meantime.
+    None means every healthy worker is busy, or none are up; the caller leaves
+    the item queued and plays filler in the meantime.
     """
     by_name = {s.name: s for s in states}
     available = [

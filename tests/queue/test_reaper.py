@@ -1,12 +1,7 @@
-"""Unit tests for the queue reaper's pure decision helpers (Day 6).
+"""Unit tests for the queue reaper's pure decision helpers.
 
-Runs in Docker, like the playout tests:
-
-    docker compose run --rm queue-reaper \
-        python -m unittest discover -s /app/queue -p 'test_*.py' -v
-
-Only the pure functions are tested here (parse/lease/decide/stats-row); the
-Redis-facing loop is covered by the Day 6 deliberate failure tests.
+Only the pure functions are covered here (parse/lease/decide/stats-row); the
+Redis-facing loop is exercised by the deliberate failure tests.
 """
 
 import json

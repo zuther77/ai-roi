@@ -1,31 +1,27 @@
-"""Day 16 - YouTube Live Chat as the PUBLIC prompt-intake path.
+"""YouTube Live Chat — the PUBLIC prompt-intake path.
 
 Viewers type `!request <prompt>` in the stream's live chat. This process polls
-the chat, and hands each matching message to submit.submit_prompt() - the SAME
-function the operator form's POST /prompts uses. Nothing about rate limiting,
-sanitizing, moderating, or enqueueing is implemented here (that is the Day 16
-acceptance criterion: reuse, not a parallel reimplementation). This module only
-adapts YouTube <-> submit_prompt: find messages, extract the prompt, optionally
-post a reply.
+the chat and hands each matching message to submit.submit_prompt(), the SAME
+function the operator form uses: nothing about rate limiting, sanitizing,
+moderating or enqueueing is reimplemented here. This module only adapts
+YouTube to submit_prompt — find messages, extract the prompt, optionally reply.
 
-Facts this is built around (YouTube Data API docs, checked Day 16):
-  * liveChatMessages.list costs 5 quota units; the default quota is 10,000 /
-    day. Polling at the API's suggested interval would exhaust it in hours, so
-    CHAT_MIN_POLL_SEC (default 60 -> ~7,200 units/day) is an enforced FLOOR,
-    never lowered by the server's pollingIntervalMillis. Generation takes ~95s
-    anyway, so the slower poll costs nothing visible.
-  * Reading chat needs only an API key. Posting a reply (liveChatMessages.insert,
-    20 units) needs OAuth, so replies are OPTIONAL: off unless OAuth refresh
+Constraints this is built around (YouTube Data API):
+  * liveChatMessages.list costs 5 quota units against a 10,000/day default.
+    Polling at the API's suggested interval would exhaust that in hours, so
+    CHAT_MIN_POLL_SEC (default 60, about 7,200 units/day) is an enforced
+    FLOOR that the server's pollingIntervalMillis can only raise.
+  * Reading chat needs only an API key; posting a reply costs 20 units and
+    needs OAuth, so replies are OPTIONAL — off unless OAuth refresh
     credentials are set, and capped by CHAT_REPLY_BUDGET_PER_HOUR.
-  * The first list call returns recent chat HISTORY. Those messages are
-    discarded, otherwise every restart would re-submit old `!request`s.
-    Trade-off (TRADE_OFF.md): requests typed while this process is down are
-    not replayed.
+  * The first list call returns recent chat HISTORY, which is discarded;
+    otherwise every restart would re-submit old `!request`s. Trade-off:
+    requests typed while this process is down are not replayed.
 
-Failure behavior: unconfigured YouTube settings => the process idles (it does
-not crash-loop under restart: always). Missing OPENAI_API_KEY => exits 3,
+Failure behavior: unconfigured YouTube settings make the process idle rather
+than crash-loop under `restart: always`. A missing OPENAI_API_KEY exits 3,
 exactly like intake.py (never accept un-screened text). A dead YouTube API
-never touches the stream - playout and the form are independent services.
+never touches the stream — playout and the form are independent services.
 """
 
 from __future__ import annotations
@@ -51,6 +47,9 @@ COMMAND = "!request"
 SOURCE = "youtube_chat"
 HTTP_TIMEOUT_SEC = 20.0
 MAX_REPLY_CHARS = 190  # YouTube chat messages are limited to 200 characters
+MAX_NAME_CHARS = 30
+SEEN_IDS_LIMIT = 5000
+MAX_BACKOFF_SEC = 900.0
 
 # `!request` alone, or `!request <text>`. `!requestfoo` must NOT match.
 _COMMAND_RE = re.compile(r"^\s*" + re.escape(COMMAND) + r"(?:\s+(.*))?\s*$",
@@ -62,13 +61,13 @@ def log(event: str, **fields) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Pure helpers - unit-tested offline
+# Pure helpers
 # ---------------------------------------------------------------------------
 
 def parse_command(message_text: object) -> str | None:
-    """None if this is not a `!request` command (ignore it entirely).
-    Otherwise the text after the command, which may be '' (a bare `!request`;
-    submit_prompt will mark that invalid and the bot replies with usage)."""
+    """None if this is not a `!request` command (ignore it entirely), else the
+    text after the command. That may be '' for a bare `!request`, which
+    submit_prompt marks invalid so the bot replies with usage."""
     if not isinstance(message_text, str):
         return None
     match = _COMMAND_RE.match(message_text)
@@ -89,31 +88,31 @@ def parse_published_at(value: object) -> datetime | None:
 
 def extract_messages(body: dict) -> list[dict]:
     """Normalize a liveChatMessages.list response into plain text-message
-    dicts: {id, text, channel_id, display_name, published_at}. Non-text events (superchats,
-    membership events, tombstones, chatEnded) are dropped."""
+    dicts. Non-text events (superchats, membership, tombstones, chatEnded)
+    are dropped."""
     out: list[dict] = []
     for item in body.get("items") or []:
         snippet = item.get("snippet") or {}
         if snippet.get("type") != "textMessageEvent":
             continue
-        text = (snippet.get("textMessageDetails") or {}).get("messageText")
+        author = item.get("authorDetails") or {}
+        details = snippet.get("textMessageDetails") or {}
+        text = details.get("messageText")
         if text is None:
             text = snippet.get("displayMessage")
-        channel_id = (item.get("authorDetails") or {}).get("channelId") \
-            or snippet.get("authorChannelId") or ""
         out.append({
             "id": item.get("id") or "",
             "text": text or "",
-            "channel_id": channel_id,
-            "display_name": (item.get("authorDetails") or {}).get("displayName") or "",
+            "channel_id": author.get("channelId") or snippet.get("authorChannelId") or "",
+            "display_name": author.get("displayName") or "",
             "published_at": parse_published_at(snippet.get("publishedAt")),
         })
     return out
 
 
 def next_poll_delay_sec(body: dict, min_poll_sec: float) -> float:
-    """Seconds to wait before the next list call. The server's suggestion can
-    only make us SLOWER; the configured floor protects the daily quota."""
+    """Seconds before the next list call. The server's suggestion can only
+    make us SLOWER; the configured floor protects the daily quota."""
     server_ms = body.get("pollingIntervalMillis")
     server_sec = float(server_ms) / 1000.0 if isinstance(server_ms, (int, float)) else 0.0
     return max(float(min_poll_sec), server_sec)
@@ -132,7 +131,7 @@ def is_new(message: dict, started_at: datetime, seen_ids: set) -> bool:
 
 def rate_key_for(channel_id: str) -> str:
     """Per-chatter rate-limit bucket. A YouTube channel id is a stronger
-    identity than an IP address (and avoids the shared-NAT problem)."""
+    identity than an IP and avoids the shared-NAT problem."""
     return "yt:" + (channel_id or "unknown")
 
 
@@ -141,10 +140,10 @@ _NAME_JUNK = re.compile(r"[\x00-\x1f\x7f]")
 
 def mention(display_name: object) -> str:
     """'@name ' prefix so a reply in a busy chat says who it is for. Control
-    characters are stripped and the name is capped; empty -> no prefix."""
+    characters are stripped and the name is capped; empty gives no prefix."""
     if not isinstance(display_name, str):
         return ""
-    name = _NAME_JUNK.sub("", display_name).strip().lstrip("@")[:30]
+    name = _NAME_JUNK.sub("", display_name).strip().lstrip("@")[:MAX_NAME_CHARS]
     return f"@{name} " if name else ""
 
 
@@ -152,15 +151,14 @@ def reply_for(result: submit.SubmitResult) -> str | None:
     """Chat reply for a submit outcome, or None for no reply.
 
     No reply for RATE_LIMITED on purpose: a chatter spamming `!request` must
-    not be able to drain the bot's reply quota (20 units each)."""
+    not be able to drain the bot's reply quota (20 units each).
+    """
     if result.outcome == submit.QUEUED:
         return f"Queued at position {result.queue_position}."
-    if result.outcome == submit.REJECTED:
+    if result.outcome in (submit.REJECTED, submit.UNAVAILABLE):
         return result.message
     if result.outcome == submit.INVALID:
         return f"Usage: {COMMAND} <describe the music you want>"
-    if result.outcome == submit.UNAVAILABLE:
-        return result.message
     return None
 
 
@@ -254,9 +252,10 @@ class ChatReplier:
     """Posts replies via liveChatMessages.insert using an OAuth refresh token.
 
     Optional: only constructed when all three OAuth values are set. The access
-    token is refreshed on demand (the 'token silently expires hours into an
-    unattended run' pitfall from the plan), and any failure is logged and
-    swallowed - a reply problem must never affect intake."""
+    token is refreshed on demand (it otherwise expires silently hours into an
+    unattended run), and any failure is logged and swallowed — a reply problem
+    must never affect intake.
+    """
 
     def __init__(self, client_id: str, client_secret: str, refresh_token: str,
                  post=http_post, clock=time.monotonic):
@@ -350,21 +349,20 @@ class ChatBot:
         self.page_token = body.get("nextPageToken") or self.page_token
         messages = extract_messages(body)
         if not self.first_poll_done:
-            # First page is chat history: discard it (see module docstring).
+            # The first page is chat history: record the ids but handle none of
+            # them, or every restart would re-submit old requests.
             self.first_poll_done = True
-            for m in messages:
-                if m["id"]:
-                    self.seen_ids.add(m["id"])
+            self.seen_ids.update(m["id"] for m in messages if m["id"])
             log("chat_history_skipped", count=len(messages))
-        else:
-            for m in messages:
-                if not is_new(m, self.started_at, self.seen_ids):
-                    continue
-                if m["id"]:
-                    self.seen_ids.add(m["id"])
-                self.handle_message(m)
-            if len(self.seen_ids) > 5000:
-                self.seen_ids = set(list(self.seen_ids)[-2500:])
+            return next_poll_delay_sec(body, self.min_poll_sec)
+        for message in messages:
+            if not is_new(message, self.started_at, self.seen_ids):
+                continue
+            if message["id"]:
+                self.seen_ids.add(message["id"])
+            self.handle_message(message)
+        if len(self.seen_ids) > SEEN_IDS_LIMIT:
+            self.seen_ids = set(list(self.seen_ids)[-SEEN_IDS_LIMIT // 2:])
         return next_poll_delay_sec(body, self.min_poll_sec)
 
     def ensure_chat_id(self) -> bool:
@@ -398,7 +396,7 @@ class ChatBot:
                 if exc.reason in ("liveChatEnded", "liveChatNotFound", "liveChatDisabled") \
                         and self.video_id:
                     self.chat_id = ""  # re-resolve on the next pass
-                backoff = min(backoff * 2, 900.0)
+                backoff = min(backoff * 2, MAX_BACKOFF_SEC)
                 self.sleep(backoff)
             except KeyboardInterrupt:
                 log("chat_intake_stop")

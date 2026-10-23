@@ -1,31 +1,24 @@
-"""Shared ACE-Step 1.5 REST client — Day 7 migration (spec: workers wrap
-the ACE-Step API server, not its internals).
+"""Shared ACE-Step 1.5 REST client, used by BOTH local workers.
 
-Used by BOTH workers:
-  - DELL: talks to the acestep15 container over the docker network
-    (ACESTEP_API_URL, e.g. http://acestep:8001)
-  - MacBook: talks to the server started by ACE-Step's own
-    start_api_server_macos.sh (http://127.0.0.1:8001 — the MLX path)
+  - DELL:    the acestep15 container over the docker network (ACESTEP_API_URL)
+  - MacBook: the server started by ACE-Step's own start_api_server_macos.sh
 
-Contract implemented (verified against ACE-Step-1.5 @ ca1e85fe):
-  POST /release_task   {prompt, lyrics, audio_duration, thinking:false}
-      -> queued job id (HTTP 429 when the server queue is full)
-  POST /query_result   {task_id_list:[id]}
-      -> {"code":200, "data":[{status:int, progress_text, ...}, ...]}
-      status 0 = still working; any other value = terminal.
-      The completed item carries the audio path somewhere inside it; the
-      exact key is not part of their documented contract, so
-      extract_audio_path() walks the item generically and logs loudly if
-      the shape is unrecognized (robust to upstream field churn).
-  GET  /v1/audio?path=...  -> file bytes, only used as a fallback when the
-      result path is not locally readable (in both our deployments the
-      server is on the same machine, so the direct path is the norm).
+Contract:
+  POST /release_task  {prompt, lyrics, audio_duration, thinking:false}
+      -> queued task id (HTTP 429 when the server queue is full)
+  POST /query_result  {task_id_list:[id]}
+      -> {"code":200, "data":[{status:int, ...}]}; status 0 = still working,
+      any other value is terminal.
+  GET  /v1/audio?path=...  -> file bytes; only a fallback for when the result
+      path is not locally readable (in both deployments the server shares the
+      machine, so the direct path is the norm).
 
-Auth: their server defaults to NO auth (_api_key None). An optional token
-is supported: either the Authorization header or the body's ai_token,
-mirroring verify_token_from_request.
+The audio path's key is not part of their documented contract, so
+extract_audio_path() walks the item generically and stays robust to upstream
+field churn. Auth is optional (their server defaults to none) and is sent both
+as the Authorization header and as the body's ai_token.
 
-Stdlib only (urllib) — the worker images carry no extra dependencies.
+Stdlib only (urllib): the worker images carry no extra dependencies.
 """
 
 from __future__ import annotations
@@ -40,6 +33,7 @@ import urllib.request
 DEFAULT_API_URL = os.environ.get("ACESTEP_API_URL", "http://127.0.0.1:8001")
 POLL_INTERVAL_SEC = 5.0
 HTTP_TIMEOUT_SEC = 60
+AUDIO_EXTS = (".wav", ".mp3", ".flac", ".ogg")
 
 
 def _log(event: str, **fields) -> None:
@@ -47,20 +41,14 @@ def _log(event: str, **fields) -> None:
                       "event": event, **fields}), flush=True)
 
 
-AUDIO_EXTS = (".wav", ".mp3", ".flac", ".ogg")
-
-
 def extract_audio_path(node) -> str | None:
     """Recursively walk a query_result item for an audio file path.
 
-    ACE-Step 1.5's terminal items embed a FETCH URL rather than a bare
-    path: "/v1/audio?path=/Users/.../track.mp3" (sometimes with the inner
-    path percent-encoded — verified live on the Mac, which hit HTTP 403
-    when the raw URL was sent back as the path). So: unwrap any path=
-    parameter first, decode percent-encoding to a fixed point, THEN check
-    the audio suffix. In both our deployments the unwrapped path is on
-    the same machine as the server, so fetch_track direct-copies it and
-    the /v1/audio route is never even used.
+    Terminal items embed a FETCH URL rather than a bare path
+    ("/v1/audio?path=/Users/.../track.mp3", sometimes percent-encoded, even
+    doubly). Sending that whole URL back as a path produced HTTP 403 on the
+    Mac, so: unwrap any path= parameter, decode to a fixed point, THEN check
+    the audio suffix.
     """
     if isinstance(node, str):
         candidate = node
@@ -86,8 +74,9 @@ def extract_audio_path(node) -> str | None:
                     value.lower().endswith(e) for e in AUDIO_EXTS):
                 found = extract_audio_path(value)  # unwrap embedded URLs too
                 return found or value
-            if lowered in ("audio", "audio_path", "audio_url", "path",
-                           "file", "filename", "url") and isinstance(value, str) and value:
+            if (lowered in ("audio", "audio_path", "audio_url", "path", "file",
+                            "filename", "url")
+                    and isinstance(value, str) and value):
                 return extract_audio_path(value) or value
             found = extract_audio_path(value)
             if found:
@@ -126,7 +115,7 @@ def extract_task_id(node) -> str | None:
 
 
 class AceStepClient:
-    """Small typed client for the parts our workers use."""
+    """Small client for the parts our workers use."""
 
     def __init__(self, base_url: str = DEFAULT_API_URL,
                  token: str | None = None,
@@ -135,7 +124,7 @@ class AceStepClient:
         self.token = token or os.environ.get("ACESTEP_API_TOKEN") or None
         self.poll_interval_sec = poll_interval_sec
 
-    # -- HTTP plumbing --------------------------------------------------
+    # -- HTTP plumbing ------------------------------------------------------
     def _request(self, method: str, path: str, payload: dict | None = None,
                  params: dict | None = None) -> dict:
         url = self.base_url + path
@@ -159,7 +148,7 @@ class AceStepClient:
         except json.JSONDecodeError:
             return {"_raw": raw.decode("utf-8", errors="replace")}
 
-    # -- public API -----------------------------------------------------
+    # -- public API ---------------------------------------------------------
     def health(self) -> dict | None:
         """Their /health, or None when unreachable."""
         try:
@@ -167,11 +156,10 @@ class AceStepClient:
         except (urllib.error.URLError, OSError, json.JSONDecodeError):
             return None
 
-    def wait_until_up(self, timeout_sec: float = 600.0,
-                      log=_log) -> dict:
-        """Block until the API server answers /health. First model load
+    def wait_until_up(self, timeout_sec: float = 600.0) -> dict:
+        """Block until the API server answers /health. The first model load
         (checkpoint download + init) happens server-side before /health
-        reports ready — ACEStepClient only needs the HTTP listener."""
+        responds, so callers pass a generous timeout."""
         deadline = time.monotonic() + timeout_sec
         last = None
         while time.monotonic() < deadline:
@@ -184,8 +172,8 @@ class AceStepClient:
             f"{timeout_sec}s; last={last!r}")
 
     def submit(self, prompt: str, duration_sec: float) -> str:
-        """Queue one generation; returns the task id. Raises RuntimeError
-        on 429 (server busy) so the worker can fail the job cleanly."""
+        """Queue one generation; returns the task id. Raises RuntimeError on
+        429 (server busy) so the worker can fail the job cleanly."""
         payload = {
             "prompt": prompt,
             "lyrics": "",
@@ -206,8 +194,8 @@ class AceStepClient:
 
     def wait(self, task_id: str, max_wait_sec: float = 7200.0,
              log=_log) -> dict:
-        """Poll /query_result until the job leaves status 0 (working).
-        Returns the terminal result item (shape logged when unexpected)."""
+        """Poll /query_result until the job leaves status 0 (working); returns
+        the terminal result item."""
         deadline = time.monotonic() + max_wait_sec
         while time.monotonic() < deadline:
             envelope = self._request(
@@ -217,8 +205,7 @@ class AceStepClient:
             if not isinstance(item, dict):
                 log("query_result_unexpected", envelope=json.dumps(envelope)[:400])
                 raise RuntimeError("query_result returned no item for task")
-            status = item.get("status")
-            if status in (None, 0, "0"):
+            if item.get("status") in (None, 0, "0"):
                 time.sleep(self.poll_interval_sec)
                 continue
             return item
@@ -226,15 +213,15 @@ class AceStepClient:
             f"task {task_id} still not terminal after {max_wait_sec}s")
 
     def is_success(self, item: dict) -> bool:
-        """Terminal item reads as success iff it contains a usable audio
+        """A terminal item reads as success iff it contains a usable audio
         path; failure items carry error text instead."""
         return extract_audio_path(item) is not None
 
     def download(self, audio_path: str, dest_path: str) -> None:
         """Fallback fetch via GET /v1/audio?path=... for the rare case the
         result path is not directly readable where the worker runs."""
-        params = {"path": audio_path}
-        url = self.base_url + "/v1/audio?" + urllib.parse.urlencode(params)
+        url = self.base_url + "/v1/audio?" + urllib.parse.urlencode(
+            {"path": audio_path})
         req = urllib.request.Request(url, method="GET")
         if self.token:
             req.add_header("Authorization", self.token)
@@ -243,14 +230,13 @@ class AceStepClient:
                 fh.write(resp.read())
 
     def fetch_track(self, item: dict, dest_path: str) -> str:
-        """Get the finished audio onto dest_path (atomicity is the caller's
-        job: write to a .tmp, rename after). Direct copy when the path is
-        locally readable, HTTP download otherwise. Returns the source."""
+        """Get the finished audio onto dest_path; returns the source path.
+        Atomicity is the caller's job (write to a .tmp, rename after). Direct
+        copy when the path is locally readable, HTTP download otherwise."""
         audio_path = extract_audio_path(item)
         if not audio_path:
             raise RuntimeError(
-                "terminal result without an audio path: "
-                + json.dumps(item)[:400])
+                "terminal result without an audio path: " + json.dumps(item)[:400])
         if os.path.exists(audio_path):
             size = os.path.getsize(audio_path)
             with open(audio_path, "rb") as src, open(dest_path, "wb") as dst:

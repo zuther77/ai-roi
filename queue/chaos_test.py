@@ -1,46 +1,39 @@
-"""Day 15 automated chaos-test harness.
+"""Automated chaos-test harness (operator tool, not a unit test).
 
 Runs INSIDE the queue-manager's container/image so it reuses store.py and
-has DATABASE_URL/REDIS_URL/REDIS_PASSWORD already in its environment:
+already has DATABASE_URL/REDIS_URL/REDIS_PASSWORD in its environment:
 
     docker compose run --rm queue-manager python /app/queue/chaos_test.py <scenario>
     docker compose run --rm queue-manager python /app/queue/chaos_test.py all
 
 See queue/run_chaos_tests.sh for the one-command driver and
-DAY15_CHAOS_TESTING.md for the full checklist this automates (and for the
-scenarios that are NOT automatable — see "Not automated" at the bottom of
-this docstring).
+DAY15_CHAOS_TESTING.md for the full checklist this automates.
 
-What this does NOT do: it does not start/stop docker services, flip .env
-values, or touch real hardware. It assumes YOU have already put the system
-into the right state (mode, which workers are up, which provider keys are
-configured) per the matching section of DAY15_CHAOS_TESTING.md, then this
-script enqueues a probe prompt and asserts on the resulting routing
-decision by polling Postgres (source_assigned) and Redis (heartbeats,
-leases, in_progress) directly — the same tables/keys an operator would
-otherwise grep logs or run psql/redis-cli for by hand.
+It does NOT start or stop docker services, flip .env values, or touch real
+hardware. It assumes YOU have already put the system into the right state
+(mode, which workers are up, which provider keys are configured) per the
+matching checklist section; it then enqueues a probe prompt and asserts on the
+resulting routing decision by polling Postgres (source_assigned) and Redis
+(heartbeats, leases, in_progress) directly.
 
-Each scenario prints a single PASS/FAIL line plus the evidence it based
-that on, so results can be pasted straight into DAY15_CHAOS_TESTING.md's
-Results Log.
+Each scenario prints one PASS/FAIL line plus its evidence, so results can be
+pasted straight into the checklist's Results Log.
 
-Not automated here (genuinely needs physical/manual action — see the
-checklist for the exact steps):
-  * Section 3's cable-pull / real network blip
-  * Section 4's REAL disk-full (this script tests the SOFTWARE PATH with a
-    tiny tmpfs instead of your actual disk — see scenario `disk_full_sim`)
-  * Section 5's internet outage (no software mitigation exists by design)
+Not automated (needs physical or manual action):
+  * the cable-pull / real network blip
+  * a REAL disk-full — scenario `disk_full_sim` tests the SOFTWARE PATH with a
+    tiny tmpfs instead of your actual disk
+  * an internet outage (no software mitigation exists, by design)
 """
 
 from __future__ import annotations
 
 import json
 import os
-import socket
 import sys
 import time
-from urllib.parse import unquote, urlparse
 
+from reaper import MiniRedis
 from store import connect
 
 POLL_INTERVAL_SEC = 1.0
@@ -58,89 +51,10 @@ def result(name: str, passed: bool, evidence: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Minimal Redis client (same stdlib RESP2 shape as reaper.py / manager.py —
-# this script is deliberately self-contained like the rest of the queue
-# package, not importing the manager's private helpers).
+# MiniRedis comes from reaper.py (stdlib-only), the same client the manager
+# and status service use. This script already imports store.py, so it runs
+# with queue/ on sys.path.
 # ---------------------------------------------------------------------------
-
-class RedisError(Exception):
-    pass
-
-
-class MiniRedis:
-    def __init__(self, url: str, password: str):
-        parsed = urlparse(url)
-        self.host = parsed.hostname or "redis"
-        self.port = parsed.port or 6379
-        self.db = int((parsed.path or "/0").strip("/") or 0)
-        self.password = unquote(parsed.password) if parsed.password else password
-        self._buf = b""
-        self._sock: socket.socket | None = None
-        self.connect()
-
-    def connect(self) -> None:
-        sock = socket.create_connection((self.host, self.port), timeout=10.0)
-        sock.settimeout(None)
-        self._sock = sock
-        self._buf = b""
-        if self.password:
-            self.command("AUTH", self.password)
-        if self.db:
-            self.command("SELECT", str(self.db))
-        self.command("PING")
-
-    def command(self, *args):
-        assert self._sock is not None
-        self._sock.sendall(self._encode(args))
-        return self._reply()
-
-    @staticmethod
-    def _encode(args) -> bytes:
-        out = [b"*%d\r\n" % len(args)]
-        for a in args:
-            b = str(a).encode("utf-8")
-            out += [b"$%d\r\n" % len(b), b, b"\r\n"]
-        return b"".join(out)
-
-    def _line(self) -> bytes:
-        while b"\r\n" not in self._buf:
-            chunk = self._sock.recv(65536)
-            if not chunk:
-                raise ConnectionError("redis closed the connection")
-            self._buf += chunk
-        line, self._buf = self._buf.split(b"\r\n", 1)
-        return line
-
-    def _exact(self, n: int) -> bytes:
-        while len(self._buf) < n:
-            chunk = self._sock.recv(65536)
-            if not chunk:
-                raise ConnectionError("redis closed the connection")
-            self._buf += chunk
-        data, self._buf = self._buf[:n], self._buf[n:]
-        return data
-
-    def _reply(self):
-        line = self._line()
-        kind = line[:1]
-        if kind == b"+":
-            return line[1:].decode("utf-8")
-        if kind == b"-":
-            raise RedisError(line[1:].decode("utf-8"))
-        if kind == b":":
-            return int(line[1:])
-        if kind == b"$":
-            n = int(line[1:])
-            if n == -1:
-                return None
-            return self._exact(n + 2)[:-2].decode("utf-8")
-        if kind == b"*":
-            n = int(line[1:])
-            if n == -1:
-                return None
-            return [self._reply() for _ in range(n)]
-        raise RedisError("unknown reply type %r" % kind)
-
 
 def _redis() -> MiniRedis:
     url = os.environ.get("REDIS_URL", "redis://redis:6379/0")
@@ -257,7 +171,8 @@ def scenario_1c_paid_only_providers_down() -> bool:
         "SELECT status, source_assigned FROM queue_items WHERE id = ?", (item_id,),
     )
     never_local = not final or final["source_assigned"] not in ("dell", "macbook_air")
-    stayed_filler = final is not None and final["status"] == "queued" and not final["source_assigned"]
+    stayed_filler = (final is not None and final["status"] == "queued"
+                     and not final["source_assigned"])
     ok = never_local and stayed_filler
     return result(
         "1c/2b paid_only / providers down, local idle -> filler, NEVER local (#34)",

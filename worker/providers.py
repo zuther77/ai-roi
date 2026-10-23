@@ -1,46 +1,34 @@
-"""Day 13 — optional paid music providers, in isolation.
+"""Optional paid music providers: two MusicProvider adapters.
 
-Two adapters implementing a MusicProvider interface (design-spec Section
-3.4), parallel to the local GenerationWorker interface in base.py but with
-a quota dimension a local worker does not have:
+Parallel to the local GenerationWorker interface in base.py, plus a quota
+dimension a local worker does not have:
 
     class MusicProvider(ABC):
-        generate(prompt, duration_sec) -> AudioResult
-        quota_remaining() -> int | None   # None = no hard ceiling (Lyria)
+        generate(prompt, duration_sec, out_path) -> AudioResult
+        quota_remaining() -> int | None   # None = no hard ceiling
         avg_latency_sec() -> float
 
-Providers (both plain API key + simple HTTP, verified against live docs):
+  * ElevenLabsProvider — POST https://api.elevenlabs.io/v1/music, header
+    xi-api-key, body {prompt, music_length_ms, model_id}; returns MP3 bytes.
+    Credit-based, so quota_remaining() tracks a running credit balance. A
+    prompt naming a real artist/song gets a `bad_prompt` error WITH a
+    suggestion — the provider's own copyright guard.
 
-  * ElevenLabsProvider — POST https://api.elevenlabs.io/v1/music
-      header xi-api-key; body {prompt, music_length_ms, model_id};
-      ?output_format=; returns MP3 bytes. Credit-based, so
-      quota_remaining() tracks a running credit balance. A prompt naming a
-      real artist/song returns a `bad_prompt` error WITH a suggestion -
-      the provider's own copyright guard (why the Day 11 copyright LLM is
-      a local_only concern).
+  * GeminiLyraProvider — POST .../v1beta/models/<model>:generateContent,
+    header x-goog-api-key; audio arrives as base64 MP3 in
+    candidates[0].content.parts[].inlineData.data. Pay-as-you-go, so
+    quota_remaining() is None unless a spend cap is configured. HTTP 429 /
+    RESOURCE_EXHAUSTED means quota.
 
-  * GeminiLyraProvider — POST .../v1beta/models/<model>:generateContent
-      header x-goog-api-key; body {contents:[{parts:[{text}]}]}; audio is
-      candidates[0].content.parts[].inlineData.data (base64 MP3, 44.1kHz
-      stereo). Pay-as-you-go: quota_remaining() returns None unless a
-      spend cap is configured. HTTP 429 / RESOURCE_EXHAUSTED == quota.
-
-Day 13 scope is ISOLATION: no queue, no Redis, no stream. The Queue
-Manager wiring and provider_health are Day 14 - stub_provider_health()
-in queue/timing.py is deliberately untouched today.
-
-Design discipline (matches ace_client.py / moderation.py):
-  * stdlib urllib only - no SDK, no new pip dependency. A local_only
-    clone with neither key set never imports or initializes a provider.
-  * Clients are built lazily (first generate() call), so merely importing
-    this module - or constructing a provider whose key is absent - does
-    no network I/O and needs no package.
-  * Typed exceptions a caller can branch on: QuotaExhausted is distinct
-    from a generic ProviderError (Day 14's fallback chain depends on
-    telling them apart); CopyrightRejected carries the provider's
-    suggested alternative prompt.
-  * Pure helpers (build_* / parse_*) take no I/O so they unit-test with a
-    fake transport, like the rest of the codebase.
+Design constraints:
+  * stdlib urllib only — no SDK, no pip dependency. Clients are built lazily,
+    so importing this module (or constructing a provider whose key is absent)
+    does no network I/O.
+  * Typed exceptions a caller can branch on: QuotaExhausted is distinct from a
+    generic ProviderError because the fallback chain depends on telling them
+    apart, and CopyrightRejected carries the suggested alternative prompt.
+  * The build_* / parse_* helpers are pure so they unit-test with a fake
+    transport.
 """
 
 from __future__ import annotations
@@ -58,11 +46,14 @@ from typing import Callable
 from base import AudioResult, validate_request
 
 ELEVENLABS_URL = "https://api.elevenlabs.io/v1/music"
+SUBSCRIPTION_URL = "https://api.elevenlabs.io/v1/user/subscription"
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 DEFAULT_ELEVENLABS_MODEL = "music_v2_5"
 DEFAULT_GEMINI_MODEL = "lyria-3-clip-preview"  # 30s clips, our radio target
 DEFAULT_OUTPUT_FORMAT = "mp3_44100_128"
 HTTP_TIMEOUT_SEC = float(os.environ.get("PROVIDER_HTTP_TIMEOUT_SEC", "300"))
+QUOTA_HTTP_TIMEOUT_SEC = 10
+LATENCY_WINDOW = 32
 
 
 # ---------------------------------------------------------------------------
@@ -78,8 +69,8 @@ class ProviderConfigError(ProviderError):
 
 
 class QuotaExhausted(ProviderError):
-    """Credits spent / rate quota hit. DISTINCT from a generic error so the
-    Day 14 fallback chain (ElevenLabs -> Gemini Lyra) can branch on it."""
+    """Credits spent / rate quota hit. Distinct from a generic error so the
+    fallback chain (ElevenLabs -> Gemini Lyra -> filler) can branch on it."""
 
 
 class CopyrightRejected(ProviderError):
@@ -92,31 +83,30 @@ class CopyrightRejected(ProviderError):
 
 
 # ---------------------------------------------------------------------------
-# Transport (production). Tests inject their own `post`.
-# A single callable shape serves both providers:
-#   post(url, headers, body_bytes) -> (status:int, resp_headers:dict, body:bytes)
+# Transport. Tests inject their own `post` / `get`.
+#   post(url, headers, body) -> (status:int, resp_headers:dict, body:bytes)
 # ---------------------------------------------------------------------------
 
 def _http_post(url: str, headers: dict, body: bytes):
     req = urllib.request.Request(url, data=body, method="POST")
-    for k, v in headers.items():
-        req.add_header(k, v)
+    for key, value in headers.items():
+        req.add_header(key, value)
     try:
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SEC) as resp:
             return resp.status, dict(resp.headers), resp.read()
     except urllib.error.HTTPError as exc:
-        # Non-2xx: hand the status + body back so the adapter can classify
-        # it (quota vs copyright vs generic) rather than raising blindly.
+        # Non-2xx: hand the status + body back so the adapter can classify it
+        # (quota vs copyright vs generic) rather than raising blindly.
         return exc.code, dict(exc.headers or {}), exc.read()
 
 
 def _http_get(url: str, headers: dict):
     req = urllib.request.Request(url, method="GET")
-    for k, v in headers.items():
-        req.add_header(k, v)
+    for key, value in headers.items():
+        req.add_header(key, value)
     try:
-        # Short: this is a tiny metadata call, and nothing should wait on it.
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        # Short timeout: a tiny metadata call that nothing should wait on.
+        with urllib.request.urlopen(req, timeout=QUOTA_HTTP_TIMEOUT_SEC) as resp:
             return resp.status, dict(resp.headers), resp.read()
     except urllib.error.HTTPError as exc:
         return exc.code, dict(exc.headers or {}), exc.read()
@@ -124,6 +114,30 @@ def _http_get(url: str, headers: dict):
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _atomic_write(path: str, data: bytes) -> None:
+    """Write to a '.tmp' name then os.replace(), so a reader never sees a
+    partially written file."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as fh:
+        fh.write(data)
+    os.replace(tmp, path)
+
+
+def _int_or_none(raw: str | None) -> int | None:
+    try:
+        return int(raw) if raw not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _float_or_none(raw: str | None) -> float | None:
+    try:
+        return float(raw) if raw not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -148,22 +162,13 @@ class MusicProvider(ABC):
         ...
 
 
-def _atomic_write(path: str, data: bytes) -> None:
-    """temp-then-rename so a reader never sees a partial file (spec 3.5)."""
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "wb") as f:
-        f.write(data)
-    os.replace(tmp, path)
-
-
 class _LatencyMixin:
     def __init__(self):
         self._samples: list[float] = []
 
     def _record(self, sec: float) -> None:
         self._samples.append(sec)
-        self._samples = self._samples[-32:]
+        self._samples = self._samples[-LATENCY_WINDOW:]
 
     def avg_latency_sec(self) -> float:
         return sum(self._samples) / len(self._samples) if self._samples else 0.0
@@ -200,7 +205,8 @@ def classify_elevenlabs_error(status: int, body: bytes) -> ProviderError:
     if status == 429:
         return QuotaExhausted(f"elevenlabs rate/credit limit: {text[:200]}")
     if code in ("bad_prompt", "bad_composition_plan"):
-        suggestion = detail.get("prompt_suggestion") or detail.get("composition_plan_suggestion")
+        suggestion = (detail.get("prompt_suggestion")
+                      or detail.get("composition_plan_suggestion"))
         return CopyrightRejected(
             f"elevenlabs rejected the prompt ({code})",
             suggestion if isinstance(suggestion, str) else None,
@@ -210,29 +216,29 @@ def classify_elevenlabs_error(status: int, body: bytes) -> ProviderError:
     return ProviderError(f"elevenlabs error {status}: {text[:200]}")
 
 
-SUBSCRIPTION_URL = "https://api.elevenlabs.io/v1/user/subscription"
-
-
 def parse_elevenlabs_credits(body: bytes | dict) -> int:
     """Remaining credits from a GET /v1/user/subscription response. Pure.
 
     remaining = character_limit - character_count (ElevenLabs still names the
-    fields "character"; they are the same credit pool music draws from).
-    Clamped at 0. Raises ProviderError on a malformed body so the caller can
-    fall back instead of reporting a made-up number.
+    fields "character"; it is the same credit pool music draws from). Clamped
+    at 0. Raises ProviderError on a malformed body so the caller can fall back
+    instead of reporting a made-up number.
     """
     try:
-        data = body if isinstance(body, dict) else json.loads(body.decode("utf-8", "replace"))
+        data = (body if isinstance(body, dict)
+                else json.loads(body.decode("utf-8", "replace")))
         return max(0, int(data["character_limit"]) - int(data["character_count"]))
     except (KeyError, TypeError, ValueError, AttributeError) as exc:
-        raise ProviderError(f"elevenlabs: unreadable subscription response: {exc}") from exc
+        raise ProviderError(
+            f"elevenlabs: unreadable subscription response: {exc}") from exc
 
 
 class ElevenLabsProvider(_LatencyMixin, MusicProvider):
     """Credit-capped provider. Lazy: constructing with no key is fine; the
-    error only fires if generate() is actually called without a key."""
+    error only fires if generate() is actually called without one."""
 
     provider_name = "elevenlabs"
+    quota_error: str = ""
 
     def __init__(self, api_key: str | None = None, *, model_id: str | None = None,
                  post: Callable | None = None):
@@ -242,9 +248,8 @@ class ElevenLabsProvider(_LatencyMixin, MusicProvider):
         self._model = model_id or os.environ.get(
             "ELEVENLABS_MODEL", DEFAULT_ELEVENLABS_MODEL)
         self._post = post or _http_post
-        # Running credit balance. None until the deployer seeds it or an API
-        # response reports it; Day 13 keeps it simple (balance tracked by the
-        # provider_quota table via the caller, not scraped from headers).
+        # Running credit balance: None until the deployer seeds it or a live
+        # lookup reports it.
         self._credit_balance: int | None = _int_or_none(
             os.environ.get("ELEVENLABS_CREDIT_BALANCE"))
 
@@ -252,10 +257,10 @@ class ElevenLabsProvider(_LatencyMixin, MusicProvider):
         return self._credit_balance
 
     def refresh_quota(self, get: Callable | None = None) -> int | None:
-        """Read the live credit balance from ElevenLabs and remember it.
+        """Read the live credit balance and remember it.
 
-        Returns the balance, or None if it could not be read - in which case
-        the previous value (a seeded ELEVENLABS_CREDIT_BALANCE, or an earlier
+        Returns the balance, or None if it could not be read — in which case
+        the previous value (a seeded ELEVENLABS_CREDIT_BALANCE or an earlier
         successful lookup) is kept rather than overwritten with a guess. Never
         raises: a failed lookup must not take the worker down.
         """
@@ -263,8 +268,9 @@ class ElevenLabsProvider(_LatencyMixin, MusicProvider):
             return None
         get = get or _http_get
         try:
-            status, _h, body = get(SUBSCRIPTION_URL, {"xi-api-key": self._api_key})
-            if status == 401 or status == 403:
+            status, _headers, body = get(SUBSCRIPTION_URL,
+                                         {"xi-api-key": self._api_key})
+            if status in (401, 403):
                 self.quota_error = (f"http {status}: the API key cannot read the account "
                                     "subscription (needs the 'user_read' permission)")
                 return None
@@ -277,8 +283,6 @@ class ElevenLabsProvider(_LatencyMixin, MusicProvider):
         except Exception as exc:  # network, parse, anything: keep the old value
             self.quota_error = f"{type(exc).__name__}: {str(exc)[:120]}"
             return None
-
-    quota_error: str = ""
 
     def generate(self, prompt: str, duration_sec: int, out_path: str) -> AudioResult:
         prompt, duration = validate_request(prompt, duration_sec)
@@ -303,7 +307,7 @@ class ElevenLabsProvider(_LatencyMixin, MusicProvider):
 
 
 # ---------------------------------------------------------------------------
-# Gemini Lyria 3.5
+# Gemini Lyria
 # ---------------------------------------------------------------------------
 
 def build_gemini_request(prompt: str, model: str, api_key: str):
@@ -321,7 +325,8 @@ def extract_gemini_audio(body: bytes) -> bytes:
 
     Shape: candidates[0].content.parts[] where the audio part is
     {inlineData:{mimeType:"audio/...", data:"<base64>"}} (camelCase on the
-    REST wire). Raises ProviderError if no audio part is present.
+    REST wire, snake_case on some clients). Raises ProviderError if no audio
+    part is present.
     """
     try:
         parsed = json.loads(body.decode("utf-8", "replace"))
@@ -341,7 +346,7 @@ def extract_gemini_audio(body: bytes) -> bytes:
 def classify_gemini_error(status: int, body: bytes) -> ProviderError:
     """Map a non-2xx generateContent response to a typed error. Pure.
 
-    Google's Status error model: {error:{code,message,status}}. 429 /
+    Google's Status error model: {error:{code,message,status}}; 429 or
     RESOURCE_EXHAUSTED is quota.
     """
     text = body.decode("utf-8", "replace") if body else ""
@@ -359,8 +364,8 @@ def classify_gemini_error(status: int, body: bytes) -> ProviderError:
 
 
 class GeminiLyraProvider(_LatencyMixin, MusicProvider):
-    """Pay-as-you-go provider. quota_remaining() is None unless a spend cap
-    is configured (GEMINI_LYRA_SPEND_CAP_USD), matching the spec."""
+    """Pay-as-you-go provider. quota_remaining() is None unless a spend cap is
+    configured (GEMINI_LYRA_SPEND_CAP_USD)."""
 
     provider_name = "gemini_lyra"
 
@@ -375,7 +380,7 @@ class GeminiLyraProvider(_LatencyMixin, MusicProvider):
 
     def quota_remaining(self) -> int | None:
         # No natural ceiling. A configured spend cap is an operational limit,
-        # surfaced here as a coarse "has budget" signal (1) vs none (0).
+        # surfaced as a coarse "has budget" (1) vs none (0).
         if self._spend_cap is None:
             return None
         return 1 if self._spend_cap > 0 else 0
@@ -401,26 +406,12 @@ class GeminiLyraProvider(_LatencyMixin, MusicProvider):
 
 
 # ---------------------------------------------------------------------------
-# Config / startup helpers (pure, unit-tested)
+# Config / startup helpers (pure)
 # ---------------------------------------------------------------------------
 
-def _int_or_none(raw: str | None) -> int | None:
-    try:
-        return int(raw) if raw not in (None, "") else None
-    except (TypeError, ValueError):
-        return None
-
-
-def _float_or_none(raw: str | None) -> float | None:
-    try:
-        return float(raw) if raw not in (None, "") else None
-    except (TypeError, ValueError):
-        return None
-
-
 def configured_providers(env: dict | None = None) -> list[str]:
-    """Which paid providers have a key present. [] means none configured —
-    a pure local_only clone. No client is constructed here."""
+    """Which paid providers have a key present. [] means none configured — a
+    pure local_only clone. No client is constructed here."""
     env = env if env is not None else os.environ
     out = []
     if (env.get("ELEVENLABS_API_KEY") or "").strip():
@@ -431,8 +422,8 @@ def configured_providers(env: dict | None = None) -> list[str]:
 
 
 def require_paid_only_config(env: dict | None = None) -> None:
-    """Edge case #31: paid_only with no usable provider key must fail loudly
-    at startup, not on the first prompt. Pure; raises ProviderConfigError.
+    """paid_only with no usable provider key must fail loudly at startup, not
+    on the first prompt. Pure; raises ProviderConfigError.
 
     Does nothing unless GENERATION_MODE is explicitly paid_only, so a
     local_only / hybrid clone with no keys is never affected.

@@ -1,37 +1,24 @@
-"""Day 11 prompt moderation. Runs inside POST /prompts, BEFORE enqueue.
+"""Prompt moderation. Runs inside prompt intake, BEFORE enqueue.
 
-Two gates, in order (cheapest first so a normal prompt stays sub-second):
+Gates in order, cheapest first:
 
-1. Harmful-content check — OpenAI moderation endpoint (hate, sexual,
-   self-harm, harassment). REQUIRED: intake fails closed at startup if
-   OPENAI_API_KEY is unset (see require_moderation_config). The stream
-   itself needs no keys; this gates only the prompt-intake feature
-   (design-spec Section 3.2).
+1. Artist/copyright keyword block — no key, no network. Full block on a match
+   (owner decision: a full block, not a rewrite). "X-style" phrasing is
+   allowed on purpose: genre vocabulary is not a reproduction request.
+2. Harmful-content check — the OpenAI moderation endpoint. REQUIRED.
+3. Optional bring-your-own OpenAI-compatible copyright check, active only
+   when COPYRIGHT_LLM_URL + _API_KEY + _MODEL are all set. When configured it
+   runs in every generation mode.
 
-2. Artist/copyright check — two layers:
-   a. An always-on keyword/fuzzy block. No key, no network, no added
-      latency. Full block on a match. "X-style" phrasing is allowed on
-      purpose: genre vocabulary is not an artist-reproduction request.
-      This is the v1 resolution of Open Question #1 (full block).
-   b. An OPTIONAL bring-your-own OpenAI-compatible chat/completions
-      check (COPYRIGHT_LLM_URL + COPYRIGHT_LLM_API_KEY +
-      COPYRIGHT_LLM_MODEL). Off unless all three are set. Config-gated
-      and mode-agnostic (Option X): when configured it runs in every
-      generation mode, in addition to the keyword block.
+The harmful-content check FAILS CLOSED: if the backend is unreachable,
+moderate_prompt raises ModerationUnavailable and the caller must NOT enqueue,
+so submitted text is never un-screened. Intake also refuses to start without
+OPENAI_API_KEY. The optional BYO layer is the one exception and fails OPEN —
+the always-on keyword block has already run, so a flaky third-party endpoint
+cannot un-block a keyword hit.
 
-Design choices:
-  * Pure decision helpers (classify_keyword, parse_moderation_response,
-    parse_copyright_llm_response, build_* request bodies) take no I/O so
-    they are unit-tested without network — the same discipline as
-    pick_next_track() and the reaper's parsers.
-  * stdlib only (urllib). The queue package already avoids pip deps
-    beyond psycopg; moderation adds none.
-  * A rejection carries a specific, user-safe reason. Never a silent drop
-    (design-spec Section 3.2; edge cases #6/#7).
-
-The flow helper moderate_prompt(...) wires the gates together and is what
-intake.py calls. It takes a `post` callable so tests inject a fake
-transport; production passes _http_post_json.
+A rejection always carries a specific, user-safe reason; never a silent drop.
+Decision helpers are pure so they test without network; `post` is injectable.
 """
 
 from __future__ import annotations
@@ -47,11 +34,8 @@ from typing import Callable
 DEFAULT_MODERATION_URL = "https://api.openai.com/v1/moderations"
 HTTP_TIMEOUT_SEC = float(os.environ.get("MODERATION_HTTP_TIMEOUT_SEC", "8"))
 
-# A small, deliberately conservative seed list of well-known artists and
-# songs. This is NOT meant to be exhaustive — it is the always-on floor a
-# deployer extends (or supplements with the optional LLM check). Matching
-# is word-boundary and case-insensitive. "<name>-style" / "style of <name>"
-# phrasing is allowed by strip_style_phrasing() before this runs.
+# A deliberately conservative seed list: the always-on floor a deployer
+# extends or supplements with the optional LLM check, not an exhaustive list.
 KEYWORD_ARTISTS = (
     "taylor swift", "drake", "beyonce", "beyoncé", "kanye west", "ye",
     "the beatles", "ariana grande", "ed sheeran", "billie eilish",
@@ -64,17 +48,14 @@ KEYWORD_SONGS = (
     "rolling in the deep", "smells like teen spirit", "hey jude",
     "god's plan", "bad guy", "uptown funk",
 )
-# Phrases that signal a reproduction request even without a known name,
-# e.g. "sing the exact lyrics to ...", "cover of ...", "karaoke version of".
+# Signal a reproduction request even without a known name.
 REPRODUCTION_PHRASES = (
     "exact lyrics", "the real lyrics", "copyrighted", "note for note",
     "karaoke version", "official lyrics",
 )
 
-# "in the style of X", "X-style", "X style", "sounds like X", "inspired by X"
-# are genre vocabulary, not reproduction. We blank these spans out before the
-# keyword scan so "daft punk style house" passes while "cover of <song>"
-# does not. Deliberate boundary call, documented per the Day 11 pitfall.
+# Style references are blanked out before the keyword scan so "daft punk style
+# house" passes while "cover of <song>" does not. Deliberate boundary call.
 _STYLE_PATTERNS = (
     re.compile(r"\bin the style of\b.*", re.IGNORECASE),
     re.compile(r"\bstyle of\b.*", re.IGNORECASE),
@@ -90,11 +71,8 @@ class ModerationConfigError(Exception):
 
 
 class ModerationUnavailable(Exception):
-    """The moderation backend could not be reached or returned garbage.
-
-    A prompt is NOT enqueued when this is raised — fail closed, never open,
-    so submitted text is never un-screened.
-    """
+    """The required backend was unreachable or returned garbage. The prompt is
+    NOT enqueued — fail closed, so text is never accepted un-screened."""
 
 
 @dataclass(frozen=True)
@@ -109,14 +87,14 @@ def require_moderation_config(env: dict | None = None) -> None:
     env = env if env is not None else os.environ
     if not (env.get("OPENAI_API_KEY") or "").strip():
         raise ModerationConfigError(
-            "OPENAI_API_KEY is required for prompt intake (Day 11 moderation)."
+            "OPENAI_API_KEY is required for prompt intake moderation."
             " The stream runs without it, but prompts cannot be accepted"
             " un-screened. Set it in .env or disable the intake service."
         )
 
 
 def copyright_llm_config(env: dict | None = None) -> dict | None:
-    """Return the BYO copyright-LLM config iff all three vars are set."""
+    """The BYO copyright-LLM config iff all three vars are set, else None."""
     env = env if env is not None else os.environ
     url = (env.get("COPYRIGHT_LLM_URL") or "").strip()
     key = (env.get("COPYRIGHT_LLM_API_KEY") or "").strip()
@@ -127,67 +105,58 @@ def copyright_llm_config(env: dict | None = None) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# Pure helpers — unit-tested without network
+# Pure helpers
 # ---------------------------------------------------------------------------
 
 def strip_style_phrasing(text: str) -> str:
-    """Blank out 'style of X' / 'X-style' / 'sounds like X' spans.
-
-    Genre vocabulary is allowed (Day 11 boundary call). Returns the text
-    with those spans replaced by spaces so the keyword scan does not see a
-    name that appeared only as a style reference.
-    """
-    out = text
+    """Replace 'style of X' / 'X-style' / 'sounds like X' spans with spaces so
+    the keyword scan never sees a name that appeared only as a style hint."""
     for pat in _STYLE_PATTERNS:
-        out = pat.sub(" ", out)
-    return out
+        text = pat.sub(" ", text)
+    return text
+
+
+def _whole_word(scan: str, term: str) -> bool:
+    return re.search(r"(?<![\w])" + re.escape(term) + r"(?![\w])", scan) is not None
+
+
+def _substring(scan: str, term: str) -> bool:
+    return term in scan
+
+
+# (terms, matcher, message template) — order is the rejection precedence.
+_COPYRIGHT_RULES = (
+    (REPRODUCTION_PHRASES, _substring,
+     'Requests to reproduce copyrighted material are not allowed (matched'
+     ' "{term}"). Try describing a mood or genre instead.'),
+    (KEYWORD_ARTISTS, _whole_word,
+     'Prompts naming a real artist are not allowed (matched "{term}").'
+     ' Describe the sound you want instead — e.g. "{term}-style" is fine.'),
+    (KEYWORD_SONGS, _whole_word,
+     'Prompts naming a specific copyrighted song are not allowed (matched'
+     ' "{term}"). Describe a style or mood instead.'),
+)
 
 
 def classify_keyword(text: str) -> ModerationResult:
-    """Always-on artist/copyright block. Pure; no network.
-
-    Allowed unless an artist/song name or a reproduction phrase survives
-    style-phrasing stripping.
-    """
+    """Always-on artist/copyright block. Pure; no network. Allowed unless a
+    name or reproduction phrase survives style-phrasing stripping."""
     scan = " " + strip_style_phrasing(text).lower() + " "
-
-    for phrase in REPRODUCTION_PHRASES:
-        if phrase in scan:
-            return ModerationResult(
-                False,
-                f"Requests to reproduce copyrighted material are not allowed"
-                f' (matched "{phrase}"). Try describing a mood or genre instead.',
-                "copyright",
-            )
-    for name in KEYWORD_ARTISTS:
-        if re.search(r"(?<![\w])" + re.escape(name) + r"(?![\w])", scan):
-            return ModerationResult(
-                False,
-                f'Prompts naming a real artist are not allowed (matched "{name}").'
-                f" Describe the sound you want instead — e.g. \"{name}-style\" is fine.",
-                "copyright",
-            )
-    for song in KEYWORD_SONGS:
-        if re.search(r"(?<![\w])" + re.escape(song) + r"(?![\w])", scan):
-            return ModerationResult(
-                False,
-                f'Prompts naming a specific copyrighted song are not allowed'
-                f' (matched "{song}"). Describe a style or mood instead.',
-                "copyright",
-            )
+    for terms, matches, template in _COPYRIGHT_RULES:
+        for term in terms:
+            if matches(scan, term):
+                return ModerationResult(
+                    False, template.format(term=term), "copyright")
     return ModerationResult(True)
 
 
 def build_moderation_request(text: str) -> dict:
-    """OpenAI moderations request body. omni-moderation-latest is current."""
     return {"model": "omni-moderation-latest", "input": text}
 
 
 def parse_moderation_response(body: dict) -> ModerationResult:
-    """Interpret an OpenAI moderations response. Pure.
-
-    `flagged` true => reject, naming the triggered categories.
-    """
+    """Interpret an OpenAI moderations response. `flagged` means reject,
+    naming the triggered categories. Pure."""
     results = body.get("results")
     if not isinstance(results, list) or not results:
         raise ValueError("moderation response has no results")
@@ -200,18 +169,12 @@ def parse_moderation_response(body: dict) -> ModerationResult:
     tripped = [name for name, on in cats.items() if on] if isinstance(cats, dict) else []
     label = ", ".join(sorted(tripped)) if tripped else "harmful content"
     return ModerationResult(
-        False,
-        f"Prompt rejected by content moderation ({label}).",
-        "harmful",
-    )
+        False, f"Prompt rejected by content moderation ({label}).", "harmful")
 
 
 def build_copyright_llm_request(text: str, model: str) -> dict:
-    """OpenAI-compatible chat/completions body asking a yes/no question.
-
-    Any endpoint speaking the chat/completions shape works — the point of
-    the BYO option is a cheaper third-party or local model.
-    """
+    """An OpenAI-compatible chat/completions body asking one yes/no question,
+    so any endpoint speaking that shape works (the point of the BYO option)."""
     system = (
         "You screen music-generation prompts. Answer with a single word:"
         " BLOCK if the prompt asks to copy, reproduce, imitate the identity"
@@ -232,8 +195,8 @@ def build_copyright_llm_request(text: str, model: str) -> dict:
 
 
 def parse_copyright_llm_response(body: dict) -> ModerationResult:
-    """Interpret the BYO LLM's reply. Pure. Fails open (ALLOW) on anything
-    that is not a clear BLOCK, matching the prompt's 'ALLOW if unsure'."""
+    """Pure. Allows anything that is not a clear BLOCK, matching the prompt's
+    'ALLOW if unsure'."""
     try:
         content = body["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError):
@@ -249,78 +212,70 @@ def parse_copyright_llm_response(body: dict) -> ModerationResult:
 
 
 # ---------------------------------------------------------------------------
-# Transport (production). Tests pass their own `post` instead.
+# Transport (production). Tests pass their own `post`.
 # ---------------------------------------------------------------------------
 
 def _http_post_json(url: str, headers: dict, payload: dict) -> dict:
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data, method="POST")
     req.add_header("Content-Type", "application/json")
-    for k, v in headers.items():
-        req.add_header(k, v)
+    for key, value in headers.items():
+        req.add_header(key, value)
     with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SEC) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
+_TRANSPORT_ERRORS = (urllib.error.URLError, OSError, ValueError,
+                     json.JSONDecodeError)
+
+
 # ---------------------------------------------------------------------------
-# Flow — what intake.py calls
+# Flow
 # ---------------------------------------------------------------------------
 
 def check_harmful(text: str, api_key: str, post: Callable, url: str) -> ModerationResult:
+    """FAILS CLOSED: a transport or parse failure raises ModerationUnavailable."""
     try:
         body = post(url, {"Authorization": f"Bearer {api_key}"},
                     build_moderation_request(text))
         return parse_moderation_response(body)
-    except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError) as exc:
+    except _TRANSPORT_ERRORS as exc:
         raise ModerationUnavailable(f"moderation endpoint error: {exc}") from exc
 
 
 def check_copyright_llm(text: str, cfg: dict, post: Callable) -> ModerationResult:
-    """Optional. On transport failure, fail OPEN (allow): the always-on
-    keyword block already ran, so this layer degrading never un-blocks a
-    keyword hit, and we do not want a flaky BYO endpoint to drop the whole
-    intake feature."""
+    """Optional layer; FAILS OPEN. The always-on keyword block already ran, so
+    degrading here cannot un-block a keyword hit, and a flaky BYO endpoint must
+    not take the whole intake feature down."""
     try:
         body = post(cfg["url"], {"Authorization": f"Bearer {cfg['api_key']}"},
                     build_copyright_llm_request(text, cfg["model"]))
         return parse_copyright_llm_response(body)
-    except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError):
+    except _TRANSPORT_ERRORS:
         return ModerationResult(True)
 
 
-def moderate_prompt(
-    text: str,
-    *,
-    env: dict | None = None,
-    post: Callable | None = None,
-) -> ModerationResult:
-    """Full Day 11 gate. Returns a ModerationResult; raises
-    ModerationUnavailable if the required harmful-content backend is
-    unreachable (fail closed — the caller must not enqueue).
-
-    Order: keyword block (free) -> harmful-content (required) -> optional
-    BYO LLM copyright check.
-    """
+def moderate_prompt(text: str, *, env: dict | None = None,
+                    post: Callable | None = None) -> ModerationResult:
+    """The full gate. Raises ModerationUnavailable when the required
+    harmful-content backend is unreachable — the caller must not enqueue."""
     env = env if env is not None else os.environ
     post = post or _http_post_json
 
-    # 1. Always-on keyword/copyright block — cheapest, no network.
-    kw = classify_keyword(text)
-    if not kw.allowed:
-        return kw
+    keyword = classify_keyword(text)
+    if not keyword.allowed:
+        return keyword
 
-    # 2. Required harmful-content check.
     api_key = (env.get("OPENAI_API_KEY") or "").strip()
     if not api_key:
-        # Should never happen: intake fails closed at startup. Belt and
-        # suspenders so a misconfig never silently skips moderation.
+        # Intake fails closed at startup, so this is belt and suspenders: a
+        # misconfiguration must never silently skip moderation.
         raise ModerationUnavailable("OPENAI_API_KEY missing at request time")
     mod_url = (env.get("OPENAI_MODERATION_URL") or DEFAULT_MODERATION_URL).strip()
     harmful = check_harmful(text, api_key, post, mod_url)
     if not harmful.allowed:
         return harmful
 
-    # 3. Optional BYO copyright LLM (Option X: runs whenever configured).
     cfg = copyright_llm_config(env)
     if cfg is not None:
         llm = check_copyright_llm(text, cfg, post)

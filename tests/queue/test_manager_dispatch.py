@@ -322,8 +322,6 @@ class ProviderLengthTest(unittest.TestCase):
         self.assertGreaterEqual(self.r.jobs("macbook_air")[0]["target_duration_sec"], 90)
 
     def test_a_180s_job_passes_provider_side_validation(self):
-        import os, sys
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "worker"))
         from base import validate_request
         validate_request("calm piano", 180)
 
@@ -338,10 +336,13 @@ class RouteReasonTest(unittest.TestCase):
                          "local busy: overflowed to provider")
 
     def test_queued_behind_busy_local_is_named(self):
-        self.assertIn("queued behind", manager.route_reason("hybrid", "macbook_air", self.wh(busy=True)))
+        self.assertIn("queued behind",
+                      manager.route_reason("hybrid", "macbook_air",
+                                           self.wh(busy=True)))
 
     def test_idle_local(self):
-        self.assertEqual(manager.route_reason("hybrid", "macbook_air", self.wh()), "local worker idle")
+        self.assertEqual(manager.route_reason("hybrid", "macbook_air", self.wh()),
+                         "local worker idle")
 
     def test_no_local_provider(self):
         self.assertEqual(manager.route_reason("hybrid", "elevenlabs", self.wh(ok=False)),

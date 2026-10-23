@@ -1,7 +1,7 @@
-"""Postgres queue (Day 8). Unit tests run the same SQL on SQLite.
+"""Postgres queue store. Unit tests run the same SQL on SQLite.
 
-Timestamps are ISO-8601 text so one statement works on both engines.
-UUIDs are generated in Python; the column type is text.
+Timestamps are ISO-8601 text and UUIDs are generated in Python (text columns)
+so one statement works on both engines.
 """
 
 from __future__ import annotations
@@ -45,10 +45,9 @@ SCHEMA = (
         assigned_at TEXT
     )
     """,
-    # Day 13: paid-provider usage/quota (design-spec Section 4). Only
-    # populated/relevant in hybrid/paid_only modes; a local_only clone never
-    # writes a row. window_type is 'credit_balance' (ElevenLabs) or 'spend'
-    # (Gemini Lyra, when a cap is configured).
+    # Paid-provider usage. Only relevant in hybrid/paid_only; a local_only
+    # clone never writes a row. window_type is 'credit_balance' (ElevenLabs)
+    # or 'spend' (Gemini Lyra, when a cap is configured).
     """
     CREATE TABLE IF NOT EXISTS provider_quota (
         id TEXT PRIMARY KEY,
@@ -63,7 +62,7 @@ SCHEMA = (
     """,
 )
 
-# Used only to fill deadline_at. Day 8 does not route on it.
+# Used only to fill deadline_at at enqueue time; routing does not read it.
 ASSUMED_TRACK_SEC = 180
 
 
@@ -79,8 +78,8 @@ class QueueStore:
     def __init__(self, conn, placeholder: str = "?"):
         self.conn = conn
         self.placeholder = placeholder
-        # sqlite3 begins a transaction on the first DML statement unless this
-        # is None, and a later BEGIN IMMEDIATE then fails. Autocommit matches
+        # sqlite3 opens a transaction on the first DML statement unless this is
+        # None, and a later BEGIN IMMEDIATE then fails. Autocommit also matches
         # the Postgres connection, which is opened with autocommit=True.
         if hasattr(conn, "isolation_level"):
             conn.isolation_level = None
@@ -88,9 +87,7 @@ class QueueStore:
             self._exec(statement)
 
     def _sql(self, sql: str) -> str:
-        if self.placeholder == "?":
-            return sql
-        return sql.replace("?", self.placeholder)
+        return sql if self.placeholder == "?" else sql.replace("?", self.placeholder)
 
     def _exec(self, sql: str, params: tuple = ()):
         return self.conn.execute(self._sql(sql), params)
@@ -98,13 +95,24 @@ class QueueStore:
     def _one(self, sql: str, params: tuple = ()):
         return self._exec(sql, params).fetchone()
 
+    def _update_status(self, item_id: str, new: str, expected: str) -> bool:
+        """Status transition guarded on the current status. True if it applied."""
+        cur = self._exec(
+            "UPDATE queue_items SET status = ? WHERE id = ? AND status = ?",
+            (new, item_id, expected),
+        )
+        return cur.rowcount == 1
+
+    # -- writes ------------------------------------------------------------
+
     def enqueue(self, prompt_text: str, target_duration_sec: int = 30,
                 source: str = "manual") -> dict:
         now = _now()
         prompt_id = str(uuid.uuid4())
         item_id = str(uuid.uuid4())
         created = _iso(now)
-        row = self._one("SELECT COALESCE(MAX(queue_position), 0) + 1 AS pos FROM queue_items")
+        row = self._one(
+            "SELECT COALESCE(MAX(queue_position), 0) + 1 AS pos FROM queue_items")
         position = int(row["pos"])
         deadline = _iso(now + timedelta(seconds=position * ASSUMED_TRACK_SEC))
         self._exec(
@@ -130,41 +138,83 @@ class QueueStore:
     def log_provider_usage(self, provider: str, *, window_type: str,
                            used: float, quota_limit: float | None = None,
                            last_error: str | None = None) -> str:
-        """Append a provider_quota row after a paid-provider call (Day 13).
+        """Append a provider_quota row after a paid-provider call.
 
-        One row per call keeps it simple and auditable; a rolling balance is
-        derived by reading the latest row per provider when Day 14 needs it.
+        One row per call keeps it auditable; a rolling balance is derived by
+        reading the latest row per provider.
         """
-        now = _now()
+        now = _iso(_now())
         row_id = str(uuid.uuid4())
         self._exec(
             "INSERT INTO provider_quota"
             " (id, provider, window_start, window_type, used, quota_limit,"
             "  last_error, updated_at)"
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (row_id, provider, _iso(now), window_type, float(used),
-             quota_limit, last_error, _iso(now)),
+            (row_id, provider, now, window_type, float(used),
+             quota_limit, last_error, now),
         )
         return row_id
 
     def record_rejected_prompt(self, prompt_text: str, source: str = "manual") -> str:
-        """Persist a moderation-rejected prompt. No queue_items row is created.
+        """Persist a moderation-rejected prompt; no queue_items row is created.
 
-        Day 11: rejected prompts are logged with enough detail to review
-        policy later (prompt text, status, time). We keep the prompt row with
-        moderation_status='rejected' rather than storing the moderation
-        backend's full raw response — the text + reason (logged to stdout by
-        intake) is what is actually useful, and keeping less is the safer
+        The prompt row keeps moderation_status='rejected' rather than the
+        backend's raw response: the text plus the reason logged by intake is
+        what is useful for reviewing policy, and keeping less is the safer
         default for a public project.
         """
-        now = _now()
         prompt_id = str(uuid.uuid4())
         self._exec(
             "INSERT INTO prompts (id, raw_text, source, moderation_status, created_at)"
             " VALUES (?, ?, ?, 'rejected', ?)",
-            (prompt_id, prompt_text, source, _iso(now)),
+            (prompt_id, prompt_text, source, _iso(_now())),
         )
         return prompt_id
+
+    def mark_generating(self, item_id: str, worker: str) -> None:
+        self._exec(
+            "UPDATE queue_items SET status = 'generating', source_assigned = ?,"
+            " assigned_at = ? WHERE id = ?",
+            (worker, _iso(_now()), item_id),
+        )
+
+    def mark_ready(self, item_id: str, file_path: str, source: str,
+                   generation_time_sec: float,
+                   duration_sec: float | None = None) -> bool:
+        """First generating -> ready wins; a hedge loser finds it already ready."""
+        if not self._update_status(item_id, "ready", "generating"):
+            return False
+        track_id = str(uuid.uuid4())
+        self._exec(
+            "INSERT INTO tracks"
+            " (id, file_path, duration_sec, source, generation_time_sec, is_filler, validated)"
+            " VALUES (?, ?, ?, ?, ?, 0, 0)",
+            (track_id, file_path, duration_sec, source, float(generation_time_sec)),
+        )
+        self._exec("UPDATE queue_items SET track_id = ? WHERE id = ?",
+                   (track_id, item_id))
+        return True
+
+    def mark_failed(self, item_id: str) -> bool:
+        """Fail only a row that is still generating; a ready hedge winner stays ready."""
+        return self._update_status(item_id, "failed", "generating")
+
+    def mark_played(self, item_id: str) -> None:
+        self._update_status(item_id, "played", "playing")
+
+    def release_to_ready(self, item_id: str) -> None:
+        """File was claimed but is not on disk yet. Try again next boundary."""
+        self._update_status(item_id, "ready", "playing")
+
+    def requeue_interrupted(self) -> None:
+        """A crash mid-play must not drop the item; the next start airs it again."""
+        self._exec("UPDATE queue_items SET status = 'ready' WHERE status = 'playing'")
+
+    def set_deadline(self, item_id: str, deadline_at: str) -> None:
+        self._exec("UPDATE queue_items SET deadline_at = ? WHERE id = ?",
+                   (deadline_at, item_id))
+
+    # -- reads -------------------------------------------------------------
 
     def next_queued(self) -> dict | None:
         row = self._one(
@@ -183,56 +233,6 @@ class QueueStore:
             "target_duration_sec": row["target_duration_sec"],
             "prompt": row["prompt"],
         }
-
-    def mark_generating(self, item_id: str, worker: str) -> None:
-        self._exec(
-            "UPDATE queue_items SET status = 'generating', source_assigned = ?,"
-            " assigned_at = ? WHERE id = ?",
-            (worker, _iso(_now()), item_id),
-        )
-
-    def mark_ready(self, item_id: str, file_path: str, source: str,
-                   generation_time_sec: float, duration_sec: float | None = None) -> bool:
-        """First generating -> ready wins. A hedge loser finds the row already ready."""
-        cur = self._exec(
-            "UPDATE queue_items SET status = 'ready' WHERE id = ? AND status = 'generating'",
-            (item_id,),
-        )
-        if cur.rowcount != 1:
-            return False
-        track_id = str(uuid.uuid4())
-        self._exec(
-            "INSERT INTO tracks"
-            " (id, file_path, duration_sec, source, generation_time_sec, is_filler, validated)"
-            " VALUES (?, ?, ?, ?, ?, 0, 0)",
-            (track_id, file_path, duration_sec, source, float(generation_time_sec)),
-        )
-        self._exec(
-            "UPDATE queue_items SET track_id = ? WHERE id = ?",
-            (track_id, item_id),
-        )
-        return True
-
-    def mark_failed(self, item_id: str) -> bool:
-        """Fail only a row that is still generating. A ready hedge winner stays ready."""
-        cur = self._exec(
-            "UPDATE queue_items SET status = 'failed' WHERE id = ? AND status = 'generating'",
-            (item_id,),
-        )
-        return cur.rowcount == 1
-
-    def mark_played(self, item_id: str) -> None:
-        self._exec(
-            "UPDATE queue_items SET status = 'played' WHERE id = ? AND status = 'playing'",
-            (item_id,),
-        )
-
-    def release_to_ready(self, item_id: str) -> None:
-        """File was claimed but is not on disk yet. Try again next boundary."""
-        self._exec(
-            "UPDATE queue_items SET status = 'ready' WHERE id = ? AND status = 'playing'",
-            (item_id,),
-        )
 
     def claim_next_ready(self) -> dict | None:
         if self.placeholder == "?":
@@ -256,12 +256,7 @@ class QueueStore:
         )
         if row is None:
             return None
-        cur = self._exec(
-            "UPDATE queue_items SET status = 'playing'"
-            " WHERE id = ? AND status = 'ready'",
-            (row["id"],),
-        )
-        if cur.rowcount != 1:
+        if not self._update_status(row["id"], "playing", "ready"):
             return None
         return {
             "queue_item_id": row["id"],
@@ -270,12 +265,8 @@ class QueueStore:
             "status": "playing",
         }
 
-    def requeue_interrupted(self) -> None:
-        """A crash mid-play must not drop the item. Next start airs it again."""
-        self._exec("UPDATE queue_items SET status = 'ready' WHERE status = 'playing'")
-
     def open_depth(self) -> int:
-        """Queued, generating, and ready. Played and failed are out of the buffer."""
+        """Queued, generating and ready — the buffer. Played and failed are out."""
         row = self._one(
             "SELECT COUNT(*) AS n FROM queue_items"
             " WHERE status IN ('queued', 'generating', 'ready')"
@@ -292,21 +283,13 @@ class QueueStore:
             return None
         return float(row["avg_sec"])
 
-    def set_deadline(self, item_id: str, deadline_at: str) -> None:
-        self._exec(
-            "UPDATE queue_items SET deadline_at = ? WHERE id = ?",
-            (deadline_at, item_id),
-        )
-
     def last_assigned_worker(self) -> str | None:
         row = self._one(
             "SELECT source_assigned FROM queue_items"
             " WHERE source_assigned IS NOT NULL AND assigned_at IS NOT NULL"
             " ORDER BY assigned_at DESC LIMIT 1"
         )
-        if row is None:
-            return None
-        return row["source_assigned"]
+        return None if row is None else row["source_assigned"]
 
 
 def connect(url: str) -> QueueStore:

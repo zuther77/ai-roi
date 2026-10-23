@@ -3,6 +3,12 @@
 For an agent or developer picking this project up cold. Read this first, then
 the two design documents in the section below.
 
+**PROJECT MARKED COMPLETE 2026-10-07.** Days 1-17 built, Days 1-16
+owner-verified. Tests now live in `tests/` and run with `./run_tests.sh`.
+See **Section 10** for the current repo layout, the test runner, the
+deploy step per service, and what is still open. The dated history below
+is kept as-is for context.
+
 **Status as of 2026-09-22:** **Sprint 1 complete** (Days 1-3 + Option A
 gapless), verified on the MacBook **and re-verified on the Linux master** -
 owner confirmed the live stream healthy after `docker compose up -d --build`.
@@ -175,9 +181,10 @@ playout/
   stream.sh              FFmpeg: gapless concat OR single-file
   filler_pool.py         SQLite store + pure pick_next_track()
   playout_controller.py  builds playlist, one long-lived FFmpeg, repeats
-  test_filler_pool.py    9 stdlib unittest tests
+  test_filler_pool.py    moved to tests/playout/ (9 stdlib unittest tests)
 worker/
-  dell_worker.py          Day 5 DELL worker: Day 4 stdlib RESP2 client +
+  dell_worker.py          Day 5 DELL worker: shared stdlib RESP2 client
+                         (worker/redis_client.py) +
                          ACE-Step pipeline loaded once at startup, atomic
                          temp-write-then-rename onto NFS, measured timing,
                          in-container NFS mount
@@ -306,7 +313,8 @@ image: python:3.12-slim + nfs-common + fastapi; the MODEL runs in a
 separate acestep15 container built from THEIR Dockerfile at ca1e85fe,
 ACESTEP_MODE=api, ACESTEP_CONFIG_PATH=acestep-v15-turbo, shared
 redis... no - shared ace-checkpoints volume + docker network
-radio-net), macbook_worker.py + test_macbook_worker.py rewritten to the
+radio-net), macbook_worker.py + acceptance_macbook.py (was
+test_macbook_worker.py) rewritten to the
 same client (the Mac keeps their start_api_server_macos.sh server, which
 owns MLX engagement). Leases/reaper/stats/health/base.py untouched
 (model-agnostic by design). Old DELL baselines (1365.55 s, 1400.3 s) are
@@ -479,7 +487,7 @@ docker compose build
 docker compose up -d
 docker compose down
 docker compose logs -f playout
-docker compose run --rm --entrypoint "" playout python -m unittest -v
+docker compose run --rm --entrypoint "" playout python -m unittest -v   # (tests moved: use ./run_tests.sh)
 
 # Gapless dry-run (finite; no YouTube)
 docker compose run --rm --entrypoint "" \
@@ -500,3 +508,87 @@ git log --all --full-history --oneline -- .env   # must be empty
 ```
 
 Prefer `docker compose logs` over `docker compose top` (argv can leak the key).
+---
+
+## 10. Project marked complete (2026-10-07) + repo layout
+
+Days 1-17 are built; Days 1-16 are owner-verified. The owner marked the project
+complete at this point. What is NOT done is listed under "Still open" below —
+nothing there blocks the stream from running.
+
+### Repo layout after the cleanup pass
+
+Production code stays flat per directory, because the containers run files by
+path (`python -u /app/queue/status.py`) and rely on `sys.path[0]` for the flat
+imports. Do not convert these into packages without also changing every
+entrypoint in `docker-compose.yml`.
+
+```
+queue/     intake, submit, moderation, ratelimit, manager, selection, timing,
+           reaper, store, status, chat_intake, chaos_test
+worker/    base, dell_worker, macbook_worker, macbook_claim, provider_worker,
+           providers, ace_client, telemetry, redis_client
+playout/   playout_controller, filler_pool
+tests/     queue/ (10 files) worker/ (3) playout/ (1) + README.md
+```
+
+`worker/redis_client.py` is the shared stdlib RESP2 client for the worker side
+(subclasses set `default_host`). `queue/reaper.py` keeps its own copy on
+purpose: `worker/macbook_claim.py` imports it and runs on the Mac's **system
+python**, so it must stay stdlib-only and self-contained.
+
+`worker/acceptance_macbook.py` (was `test_macbook_worker.py`) is deliberately
+NOT under `tests/` — it performs a real paid generation, and a `test_*.py` name
+inside `tests/` would let discovery fire it.
+
+**No third-party runtime dependencies, by design.** `queue-reaper` and
+`provider-worker` run on bare `python:3.12-slim` with no `pip install`, and
+`macbook_claim.py` runs on system python. Pydantic was evaluated and rejected
+for this reason. Verify before adding an import:
+
+```sh
+python3 - <<'EOF'
+import ast, pathlib, sys
+local = {p.stem for d in ("queue", "worker", "playout") for p in pathlib.Path(d).glob("*.py")}
+for f in ("queue/reaper.py", "worker/provider_worker.py", "worker/macbook_claim.py"):
+    for n in ast.walk(ast.parse(pathlib.Path(f).read_text())):
+        names = ([a.name for a in n.names] if isinstance(n, ast.Import)
+                 else [n.module or ""] if isinstance(n, ast.ImportFrom) else [])
+        for top in (m.split(".")[0] for m in names if m):
+            if top not in sys.stdlib_module_names and top not in local:
+                print("third-party:", f, top)
+print("done")
+EOF
+```
+
+### Running the tests
+
+```sh
+./run_tests.sh           # all areas: queue + worker + playout
+./run_tests.sh queue     # one area
+```
+
+It sets `PYTHONPATH` to `queue:worker:playout` and runs
+`unittest discover` per area. 372 tests at the time of writing (queue 280,
+worker 83, playout 9). The old
+`docker compose run --rm --entrypoint "" playout python -m unittest` no longer
+finds them.
+
+### Deploying after a code change
+
+Bind-mounted services (`queue-*`, `provider-worker`, `status`, `chat-intake`)
+read code from the host, so `up -d --build` does NOT restart them — Compose
+sees no config change. Use `docker compose restart <service>`. `playout` bakes
+its code into the image and does need `--build`.
+
+### Still open
+
+* **YouTube chat replies** — implemented, never manually tested against a live
+  stream. Needs the three `YOUTUBE_OAUTH_*` values.
+* **Day 18** — the 24-hour soak test has not been run.
+* **`SAFETY_MARGIN_SEC=120`** is now shorter than a single 90s-track
+  generation. Re-measure from `generation_stats` and retune.
+* **DELL is parked** (needs the <=6 GB VAE decode fix; see `worker/README.md`).
+* `base.GenerationWorker._latency` is a **class** attribute, so instances would
+  share one latency window. Harmless today (one worker instance per process),
+  a bug the moment two coexist.

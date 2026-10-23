@@ -1,27 +1,27 @@
-"""Day 17 - operations dashboard: GET /status (JSON) and GET / (auto-refreshing page).
+"""Operations dashboard: GET /status (JSON) and GET / (auto-refreshing page).
 
-An operator tool, not part of the generation path. It READS the same sources
-the rest of the system already writes and never writes anything:
+An operator tool, not part of the generation path. It only READS what the rest
+of the system already writes and never writes anything:
 
-  queue depth, reject rate, failures  -> Postgres (queue_items, prompts)
+  queue depth, reject rate, failures    -> Postgres (queue_items, prompts)
   worker / provider health, busy, quota -> Redis heartbeats (worker:<name>)
-  rolling latency                      -> generation_stats.db (SQLite, reaper-fed)
-  stream uptime                        -> playout log, `ffmpeg_started` events
-  filler pool, disk                    -> filler-pool/ and the tracks volume
+  rolling latency                       -> generation_stats.db (reaper-fed)
+  stream uptime                         -> playout log, ffmpeg_started events
+  filler pool, disk                     -> filler-pool/ and the tracks volume
 
-Design rules (plan Day 17 pitfalls):
-  * CHEAP. The whole payload is cached for CACHE_TTL_SEC, so ten open tabs cost
-    the same as one and a dashboard can never become load on the system.
-  * ISOLATED. Each section is computed on its own; a dead Redis shows an error
-    in that section and the rest still renders. (A monitor that 500s when
-    something is down is useless exactly when it is needed.)
-  * HONEST. Every number is documented with what it counts, and sections whose
-    source cannot be read say so instead of showing a plausible zero.
-  * NO SECRETS, NO PROMPT TEXT in the output. Counts and states only.
+Design rules:
+  * CHEAP. The whole payload is cached for CACHE_TTL_SEC, so ten open tabs
+    cost the same as one and the dashboard can never become load on the
+    system it is monitoring.
+  * ISOLATED. Each section is computed on its own, so a dead Redis shows an
+    error in that section and everything else still renders. A monitor that
+    500s when something is down is useless exactly when it is needed.
+  * HONEST. Sections whose source cannot be read say so instead of showing a
+    plausible zero.
+  * NO SECRETS and NO PROMPT TEXT in the output. Counts and states only.
 
-Security: there is no authentication. It is published on localhost only by
-default (STATUS_BIND, Compose) for that reason; do not expose it to a network
-you do not trust.
+Security: there is no authentication, which is why Compose publishes it on
+localhost only by default. Do not expose it to a network you do not trust.
 """
 
 from __future__ import annotations
@@ -49,8 +49,9 @@ from timing import (
 
 WORKERS = ("dell", "macbook_air")
 HEARTBEAT_TTL_SEC = 20          # workers SETEX worker:<name> with this TTL
-CACHE_TTL_SEC = float(os.environ.get("STATUS_CACHE_SEC", "3"))
 ROLLING_WINDOW = 20
+
+CACHE_TTL_SEC = float(os.environ.get("STATUS_CACHE_SEC", "3"))
 STATS_DB = os.environ.get("STATS_DB", "/app/queue/generation_stats.db")
 PLAYOUT_LOG = Path(os.environ.get("PLAYOUT_LOG", "/app/logs/playout.jsonl"))
 FILLER_DIR = Path(os.environ.get("FILLER_DIR", "/app/filler-pool"))
@@ -66,32 +67,37 @@ def log(event: str, **fields) -> None:
     print(json.dumps(entry, default=str), flush=True)
 
 
+def _json_object(raw: str | None) -> dict:
+    """Parse a JSON object, or {} for anything absent or malformed."""
+    if not raw:
+        return {}
+    try:
+        body = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
 # ---------------------------------------------------------------------------
-# Pure helpers - unit-tested offline
+# Pure helpers
 # ---------------------------------------------------------------------------
 
 def heartbeat_view(raw: str | None, ttl: int | None) -> dict:
     """Interpret a worker heartbeat. Pure.
 
-    `ttl` is Redis's remaining TTL for the key. The worker refreshes it to
-    HEARTBEAT_TTL_SEC every ~5s, so age = TTL_SEC - ttl. A missing key means no
-    heartbeat in the last HEARTBEAT_TTL_SEC seconds: the worker is down, which
-    is also exactly the manager's definition of "unhealthy".
+    `ttl` is Redis's remaining TTL, which the worker refreshes to
+    HEARTBEAT_TTL_SEC every ~5s, so age = HEARTBEAT_TTL_SEC - ttl. A missing
+    key means no heartbeat in that window: the worker is down, which is also
+    the manager's definition of unhealthy.
     """
     if not raw:
         return {"state": "down", "busy": False, "age_sec": None, "detail": {}}
-    try:
-        body = json.loads(raw)
-        if not isinstance(body, dict):
-            body = {}
-    except (ValueError, TypeError):
-        body = {}
-    age = None
-    if isinstance(ttl, int) and ttl >= 0:
-        age = max(0, HEARTBEAT_TTL_SEC - ttl)
+    body = _json_object(raw)
+    age = max(0, HEARTBEAT_TTL_SEC - ttl) if isinstance(ttl, int) and ttl >= 0 else None
+    busy = bool(body.get("busy"))
     return {
-        "state": "busy" if body.get("busy") else "idle",
-        "busy": bool(body.get("busy")),
+        "state": "busy" if busy else "idle",
+        "busy": busy,
         "age_sec": age,
         "detail": {k: v for k, v in body.items() if k != "busy"},
     }
@@ -103,8 +109,8 @@ def rolling_average(samples: list[float]) -> float | None:
 
 
 def reject_rate(rejected: int, total: int) -> float | None:
-    """Fraction of moderated prompts rejected. None when there were none (a
-    rate over zero prompts is undefined, not 0%). Pure."""
+    """Fraction of moderated prompts rejected. None when there were none — a
+    rate over zero prompts is undefined, not 0%. Pure."""
     return None if total <= 0 else round(rejected / total, 4)
 
 
@@ -126,37 +132,32 @@ def uptime_seconds(started_iso: str | None, now: datetime) -> float | None:
     return max(0.0, (now - started).total_seconds())
 
 
-def last_ffmpeg_start(lines: list[str]) -> tuple[str | None, int]:
-    """From playout JSONL lines (oldest first): (timestamp of the most recent
-    `ffmpeg_started`, count of starts seen). The count is how many times FFmpeg
-    was (re)started within the lines supplied - restarts = count - 1. Pure."""
+def _scan_event(lines: list[str], event: str) -> tuple[str | None, int]:
+    """(timestamp of the most recent `event`, how many were seen). Lines are
+    playout JSONL, oldest first. Pure."""
+    quoted = f'"{event}"'
     last, count = None, 0
     for line in lines:
-        if '"ffmpeg_started"' not in line:
+        if quoted not in line:
             continue
         try:
             entry = json.loads(line)
         except ValueError:
             continue
-        if entry.get("event") == "ffmpeg_started":
+        if entry.get("event") == event:
             last, count = entry.get("ts"), count + 1
     return last, count
 
 
-def last_stream_problem(lines: list[str], since_iso: str | None) -> str | None:
-    """Most recent ffmpeg_error timestamp after `since_iso` (the current run's
-    start), else None. Pure."""
-    found = None
-    for line in lines:
-        if '"ffmpeg_error"' not in line:
-            continue
-        try:
-            entry = json.loads(line)
-        except ValueError:
-            continue
-        if entry.get("event") == "ffmpeg_error":
-            found = entry.get("ts")
-    return found
+def last_ffmpeg_start(lines: list[str]) -> tuple[str | None, int]:
+    """(most recent ffmpeg_started timestamp, number of starts in `lines`).
+    Restarts = count - 1. Pure."""
+    return _scan_event(lines, "ffmpeg_started")
+
+
+def last_stream_problem(lines: list[str]) -> str | None:
+    """Most recent ffmpeg_error timestamp in `lines`, else None. Pure."""
+    return _scan_event(lines, "ffmpeg_error")[0]
 
 
 def tail_lines(path: Path, max_bytes: int = 400_000) -> list[str]:
@@ -167,11 +168,12 @@ def tail_lines(path: Path, max_bytes: int = 400_000) -> list[str]:
         f.seek(max(0, size - max_bytes))
         data = f.read().decode("utf-8", "replace")
     lines = data.splitlines()
+    # Drop the first line when the file was truncated: it is a partial record.
     return lines[1:] if size > max_bytes and lines else lines
 
 
 # playout.jsonl rotates at 5 MB (backupCount 3). Read the current file plus the
-# newest backup, so an `ffmpeg_started` written before a rotation is still seen.
+# newest backup so an ffmpeg_started written before a rotation is still seen.
 # ~10 MB per refresh is trivial because responses are cached.
 LOG_READ_BYTES = 6_000_000
 
@@ -179,9 +181,9 @@ LOG_READ_BYTES = 6_000_000
 def read_playout_lines(log_path: Path) -> list[str]:
     """Oldest-first lines from the rotated backup (if any) then the live file."""
     lines: list[str] = []
-    for p in (log_path.with_name(log_path.name + ".1"), log_path):
-        if p.exists():
-            lines += tail_lines(p, max_bytes=LOG_READ_BYTES)
+    for path in (log_path.with_name(log_path.name + ".1"), log_path):
+        if path.exists():
+            lines += tail_lines(path, max_bytes=LOG_READ_BYTES)
     return lines
 
 
@@ -197,9 +199,8 @@ _GENERATED_SUFFIX = re.compile(r"-(?:[0-9a-f]{8}|\d{8}t\d{6})$")
 def title_from_filename(name: str) -> str:
     """Human title from a track file name. Pure.
 
-    Generated tracks are '<prompt-slug>-<jobid8>.<ext>': drop the extension and
-    the id suffix and turn hyphens into spaces. Other names (filler) only lose the
-    extension and get underscores/hyphens turned into spaces.
+    Generated tracks are '<prompt-slug>-<jobid8>.<ext>', so the extension and
+    the id suffix are dropped; other names (filler) only lose the extension.
     """
     stem = os.path.splitext(os.path.basename(name or ""))[0]
     stem = _GENERATED_SUFFIX.sub("", stem)
@@ -208,13 +209,13 @@ def title_from_filename(name: str) -> str:
 
 
 def find_now_playing(lines: list[str], now: datetime) -> dict:
-    """What is on air, from playout's track_start / track_end log events. Pure.
+    """What is on air, from playout's track_start / track_end events. Pure.
 
-    Walks the log oldest-first keeping the current track. A track_end for it, or
-    any event that means FFmpeg/the container restarted, clears it. If the last
-    track_start is older than its own duration plus slack with no track_end, the
-    log is stale (playout died mid-track) and we say so rather than claim the
-    song is still playing.
+    Walks the log oldest-first keeping the current track. A matching track_end,
+    or any event meaning FFmpeg or the container restarted, clears it. If the
+    last track_start is older than its own duration plus slack with no
+    track_end, playout died mid-track: say the log is stale rather than claim
+    the song is still playing.
     """
     current = None
     last = None
@@ -241,20 +242,22 @@ def find_now_playing(lines: list[str], now: datetime) -> dict:
             "duration_sec": last["duration_sec"]}
     if current is None:
         return {"state": "between_tracks", **base, "note": "last track finished"}
+
     elapsed = uptime_seconds(current["started_at"], now)
     duration = current["duration_sec"]
-    if elapsed is not None and isinstance(duration, (int, float)) \
-            and elapsed > duration + _STALE_SLACK_SEC:
+    if (elapsed is not None and isinstance(duration, (int, float))
+            and elapsed > duration + _STALE_SLACK_SEC):
         return {"state": "unknown", **base, "elapsed_sec": round(elapsed, 1),
                 "note": "last logged track should have ended already; the "
                         "playout log looks stale"}
     return {"state": "playing", **base, "started_at": current["started_at"],
-            "elapsed_sec": None if elapsed is None else round(min(elapsed, duration or elapsed), 1)}
+            "elapsed_sec": None if elapsed is None
+            else round(min(elapsed, duration or elapsed), 1)}
 
 
 def lookup_track_source(store, filename: str) -> str | None:
-    """Which worker/provider generated this file, from the tracks table, or None
-    (filler tracks are not in it). Matches on the file's base name."""
+    """Which worker or provider generated this file, from the tracks table, or
+    None (filler tracks are not in it). Matches on the file's base name."""
     like = "%" + filename.replace("\\", "\\\\").replace("%", "\\%")
     rows = store._exec(
         "SELECT file_path, source FROM tracks WHERE file_path LIKE ? LIMIT 20",
@@ -278,8 +281,8 @@ def overall_level(sections: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Section collectors. Each takes its dependencies and returns a plain dict; an
-# exception is turned into {"error": ...} by safe_section(), never propagated.
+# Section collectors. Each returns a plain dict; safe_section() turns an
+# exception into {"error": ...} so one dead source never fails the page.
 # ---------------------------------------------------------------------------
 
 def safe_section(fn, *args) -> dict:
@@ -319,7 +322,7 @@ def collect_moderation(store, now: datetime) -> dict:
         "rejected": rejected,
         "moderated": total,
         "rate": rate,
-        # a spike can mean abuse, but one rejection of two prompts is noise
+        # A spike can mean abuse, but one rejection out of two prompts is noise.
         "warn": rate is not None and total >= 5 and rate >= REJECT_RATE_WARN,
         "note": "counts prompts that reached moderation; rate-limited and "
                 "malformed submissions are rejected earlier and not stored",
@@ -327,8 +330,8 @@ def collect_moderation(store, now: datetime) -> dict:
 
 
 def collect_failures(store, now: datetime) -> dict:
-    """Per-source failure rate from the queue table (last 24h). Failures are not
-    in generation_stats (it only receives successes), so this is the real one."""
+    """Per-source failure rate from the queue table. generation_stats only
+    receives successes, so the queue table is the only honest source here."""
     cutoff = (now - timedelta(hours=24)).isoformat()
     rows = store._exec(
         "SELECT source_assigned AS src, status, COUNT(*) AS n FROM queue_items"
@@ -337,16 +340,16 @@ def collect_failures(store, now: datetime) -> dict:
         (cutoff,),
     ).fetchall()
     per: dict = {}
-    for r in rows:
-        d = per.setdefault(r["src"], {"failed": 0, "finished": 0})
-        d["finished"] += int(r["n"])
-        if r["status"] == "failed":
-            d["failed"] += int(r["n"])
+    for row in rows:
+        entry = per.setdefault(row["src"], {"failed": 0, "finished": 0})
+        entry["finished"] += int(row["n"])
+        if row["status"] == "failed":
+            entry["failed"] += int(row["n"])
     return {
         "window": "last 24 hours",
         "by_source": {
-            src: {**d, "rate": failure_rate(d["failed"], d["finished"])}
-            for src, d in sorted(per.items())
+            src: {**entry, "rate": failure_rate(entry["failed"], entry["finished"])}
+            for src, entry in sorted(per.items())
         },
     }
 
@@ -358,7 +361,8 @@ def read_latency(path: str) -> dict:
         return out
     conn = sqlite3.connect("file:" + path + "?mode=ro", uri=True)
     try:
-        names = [r[0] for r in conn.execute("SELECT DISTINCT worker FROM generation_stats")]
+        names = [r[0] for r in conn.execute(
+            "SELECT DISTINCT worker FROM generation_stats")]
         for name in names:
             rows = conn.execute(
                 "SELECT generation_time_sec FROM generation_stats WHERE worker = ?"
@@ -384,7 +388,7 @@ def collect_workers(r, latency: dict, failures: dict) -> dict:
             "avg_latency_sec": lat.get("avg_sec"),
             "latency_samples": lat.get("samples", 0),
             "failure_rate_24h": fail.get("rate"),
-            # reported by the worker itself: GPU temp (DELL), thermal (MacBook)
+            # Reported by the worker itself: GPU temp (DELL), thermal (MacBook).
             "temperature_c": view["detail"].get("temperature_c"),
             "thermal": view["detail"].get("thermal"),
         }
@@ -396,7 +400,7 @@ def collect_providers(r, mode: str, configured: list[str], latency: dict,
     heartbeats = {}
     for name in PROVIDERS:
         raw = r.command("GET", f"worker:{name}")
-        heartbeats[name] = None if not raw else _json_or_empty(raw)
+        heartbeats[name] = None if not raw else _json_object(raw)
     health = provider_health_from(mode, heartbeats, configured)
     out = {}
     for name in PROVIDERS:
@@ -408,9 +412,9 @@ def collect_providers(r, mode: str, configured: list[str], latency: dict,
         hb = heartbeats[name]
         out[name] = {
             "configured": True,
-            # `routing_ok` is what the manager uses; it is False in local_only
-            # by design even when the provider itself is alive.
             "alive": hb is not None,
+            # routing_ok is what the manager uses; it is False in local_only by
+            # design even when the provider itself is alive.
             "routing_ok": health[name]["ok"],
             "quota_remaining": (hb or {}).get("quota_remaining"),
             "avg_latency_sec": lat.get("avg_sec"),
@@ -420,15 +424,10 @@ def collect_providers(r, mode: str, configured: list[str], latency: dict,
     return out
 
 
-def _json_or_empty(raw: str) -> dict:
-    try:
-        body = json.loads(raw)
-        return body if isinstance(body, dict) else {}
-    except (ValueError, TypeError):
-        return {}
-
-
 def collect_stream(now: datetime, log_path: Path | None = None) -> dict:
+    # Resolved HERE, not as a default argument: binding PLAYOUT_LOG at import
+    # time made overriding it (by env or test) silently ignored, and the
+    # section always reported "log not found". That was a real bug.
     log_path = log_path or PLAYOUT_LOG
     if not log_path.exists():
         return {"state": "unknown", "error": f"playout log not found at {log_path}"}
@@ -438,21 +437,20 @@ def collect_stream(now: datetime, log_path: Path | None = None) -> dict:
         return {"state": "unknown",
                 "error": "no ffmpeg_started event in the recent playout log "
                          "(is playout running the build that logs it?)"}
-    last_err = last_stream_problem(lines, started)
     return {
         "state": "up",
         "uptime_sec": uptime_seconds(started, now),
         "last_ffmpeg_start": started,
         "ffmpeg_starts_in_log": count,
         "restarts_in_log": max(0, count - 1),
-        "last_ffmpeg_error": last_err,
+        "last_ffmpeg_error": last_stream_problem(lines),
         "note": "uptime = time since FFmpeg was last started; it does not prove "
                 "YouTube is receiving data - check Studio for that",
     }
 
 
 def collect_now_playing(store, now: datetime, log_path: Path | None = None) -> dict:
-    log_path = log_path or PLAYOUT_LOG
+    log_path = log_path or PLAYOUT_LOG  # resolved at call time; see collect_stream
     if not log_path.exists():
         return {"state": "unknown", "note": f"playout log not found at {log_path}"}
     info = find_now_playing(read_playout_lines(log_path), now)
@@ -465,8 +463,8 @@ def collect_now_playing(store, now: datetime, log_path: Path | None = None) -> d
 
 def collect_filler(filler_dir: Path = FILLER_DIR, tracks_dir: Path = TRACKS_DIR) -> dict:
     audio = filler_dir / "audio"
-    files = [p for p in audio.iterdir() if p.is_file() and not p.name.startswith(".")] \
-        if audio.is_dir() else []
+    files = [p for p in audio.iterdir()
+             if p.is_file() and not p.name.startswith(".")] if audio.is_dir() else []
     out = {
         "filler_tracks": len(files),
         "filler_bytes": sum(p.stat().st_size for p in files),
@@ -497,7 +495,9 @@ class Collector:
         return self._redis
 
     def snapshot(self) -> dict:
-        with self._lock:  # one recompute at a time; everyone else gets the cache
+        # Cached so the dashboard can never become load: one recompute at a
+        # time, and every other caller gets the cached payload.
+        with self._lock:
             now_mono = time.monotonic()
             if self._cache and now_mono - self._cache[0] < CACHE_TTL_SEC:
                 return self._cache[1]
@@ -505,36 +505,39 @@ class Collector:
             self._cache = (now_mono, data)
             return data
 
+    def _redis_section(self, fn, *args) -> dict:
+        try:
+            return fn(self._r(), *args)
+        except Exception as exc:
+            self._redis = None  # reconnect next time
+            return {"error": f"redis: {type(exc).__name__}: {str(exc)[:120]}"}
+
     def _build(self) -> dict:
         now = datetime.now(timezone.utc)
         configured = configured_providers(self.env)
         mode = resolve_mode(self.env.get("GENERATION_MODE"), configured)
 
         failures = safe_section(collect_failures, self.store, now)
+        healthy_failures = failures if "error" not in failures else {}
         try:
             latency = read_latency(STATS_DB)
             latency_err = None
         except Exception as exc:
             latency, latency_err = {}, f"{type(exc).__name__}: {str(exc)[:120]}"
 
-        def redis_section(fn, *args):
-            try:
-                return fn(self._r(), *args)
-            except Exception as exc:
-                self._redis = None  # reconnect next time
-                return {"error": f"redis: {type(exc).__name__}: {str(exc)[:120]}"}
-
-        workers = redis_section(collect_workers, latency,
-                                failures if "error" not in failures else {})
-        providers = redis_section(collect_providers, mode, configured, latency,
-                                  failures if "error" not in failures else {})
         sections = {
-            "mode": {"generation_mode": mode, "configured_providers": configured,
-                     "local_min_duration_sec": self.env.get("LOCAL_MIN_DURATION_SEC") or "90 (default)",
-                     "provider_duration_sec": self.env.get("PROVIDER_DURATION_SEC") or "180 (default)"},
+            "mode": {
+                "generation_mode": mode,
+                "configured_providers": configured,
+                "local_min_duration_sec":
+                    self.env.get("LOCAL_MIN_DURATION_SEC") or "90 (default)",
+                "provider_duration_sec":
+                    self.env.get("PROVIDER_DURATION_SEC") or "180 (default)",
+            },
             "queue": safe_section(collect_queue, self.store),
-            "workers": workers,
-            "providers": providers,
+            "workers": self._redis_section(collect_workers, latency, healthy_failures),
+            "providers": self._redis_section(collect_providers, mode, configured,
+                                             latency, healthy_failures),
             "now_playing": safe_section(collect_now_playing, self.store, now),
             "stream": safe_section(collect_stream, now),
             "moderation": safe_section(collect_moderation, self.store, now),
@@ -543,7 +546,8 @@ class Collector:
         }
         if latency_err:
             sections["latency_error"] = {"error": latency_err}
-        return {"generated_at": now.isoformat(), "level": overall_level(sections), **sections}
+        return {"generated_at": now.isoformat(),
+                "level": overall_level(sections), **sections}
 
 
 # ---------------------------------------------------------------------------

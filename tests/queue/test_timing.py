@@ -1,17 +1,28 @@
-"""Day 9 selection. Seeded latencies, no Redis and no Postgres.
+"""Worker selection and hedge timing. Seeded latencies, no Redis, no Postgres.
 
-Day 8's naive rule, with both workers idle and nobody assigned yet,
-picks dell. Measured latencies pick the faster idle worker instead.
+The naive rule with both workers idle and nobody assigned yet picks dell;
+measured latencies pick the faster idle worker instead.
 """
 
+import json
 import unittest
 from datetime import datetime, timezone
 
 from selection import WorkerState
 from timing import (
+    DEFAULT_LOCAL_MIN_DURATION_SEC,
+    PaidOnlyMisconfigured,
     SAFETY_MARGIN_SEC,
+    choose_source,
+    configured_providers,
+    effective_duration_sec,
+    parse_local_min_duration,
+    parse_provider_duration,
     plan_assignment,
     primary_wait_sec,
+    provider_health_from,
+    require_paid_only_config,
+    resolve_mode,
     rolling_average,
     stub_provider_health,
 )
@@ -225,16 +236,6 @@ class HedgePolicyTest(unittest.TestCase):
 # Local workers produce at least LOCAL_MIN_DURATION_SEC of music
 # ---------------------------------------------------------------------------
 
-import json  # noqa: E402
-
-from timing import (  # noqa: E402
-    DEFAULT_LOCAL_MIN_DURATION_SEC,
-    effective_duration_sec,
-    parse_local_min_duration,
-    parse_provider_duration,
-)
-
-
 class ParseLocalMinTest(unittest.TestCase):
     def test_default_is_90(self):
         self.assertEqual(DEFAULT_LOCAL_MIN_DURATION_SEC, 90.0)
@@ -283,6 +284,51 @@ class EffectiveDurationTest(unittest.TestCase):
         self.assertEqual(effective_duration_sec("elevenlabs", 30, 90), 180)
 
 
+class HybridNoLocalWorkerTest(unittest.TestCase):
+    """hybrid with NO healthy local worker must apply the same provider
+    availability rule as every other site: an exhausted or unknown balance is
+    not routable. Previously this branch ignored the quota and sent a doomed
+    paid call to ElevenLabs."""
+
+    def health(self, ok):
+        return {name: {"ok": ok, "busy": False, "avg_latency_sec": None,
+                       "estimated_free_in_sec": 0} for name in ("dell", "macbook_air")}
+
+    def providers(self, el_ok, el_quota, gm_ok=False):
+        return {"elevenlabs": {"ok": el_ok, "quota_remaining": el_quota},
+                "gemini_lyra": {"ok": gm_ok, "quota_remaining": None}}
+
+    def test_funded_elevenlabs_is_used(self):
+        self.assertEqual(
+            choose_source("hybrid", self.health(False), self.providers(True, 8200)),
+            "elevenlabs")
+
+    def test_exhausted_elevenlabs_falls_to_gemini(self):
+        self.assertEqual(
+            choose_source("hybrid", self.health(False),
+                          self.providers(True, 0, gm_ok=True)),
+            "gemini_lyra")
+
+    def test_exhausted_elevenlabs_and_no_gemini_falls_to_filler(self):
+        self.assertEqual(
+            choose_source("hybrid", self.health(False), self.providers(True, 0)),
+            "filler_pool")
+
+    def test_unknown_balance_counts_as_exhausted(self):
+        self.assertEqual(
+            choose_source("hybrid", self.health(False), self.providers(True, None)),
+            "filler_pool")
+
+    def test_matches_paid_only_for_the_same_provider_state(self):
+        # The two modes disagreed before: paid_only said filler, hybrid said
+        # elevenlabs. They must agree when no local worker can help either way.
+        for quota in (0, None):
+            with self.subTest(quota=quota):
+                health, prov = self.health(False), self.providers(True, quota)
+                self.assertEqual(choose_source("hybrid", health, prov),
+                                 choose_source("paid_only", health, prov))
+
+
 class ManagerJobPayloadTest(unittest.TestCase):
     """The wiring: what the manager actually pushes onto Redis."""
 
@@ -322,29 +368,14 @@ class ManagerJobPayloadTest(unittest.TestCase):
 
     def test_the_job_still_passes_worker_side_validation(self):
         # A floor the worker would reject would fail every local job.
-        import sys, os
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "worker"))
         from base import validate_request
         job = self._payload("macbook_air")
         validate_request(job["prompt"], job["target_duration_sec"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 # ---------------------------------------------------------------------------
-# Day 14 — generation modes wired in
+# Generation modes
 # ---------------------------------------------------------------------------
-
-from timing import (  # noqa: E402
-    PaidOnlyMisconfigured,
-    configured_providers,
-    provider_health_from,
-    require_paid_only_config,
-    resolve_mode,
-)
-
 
 def providers_down():
     return {
@@ -513,3 +544,7 @@ class ModeRoutingTest(unittest.TestCase):
         plan = self._plan("paid_only", both_idle(1365, 95), ph, depth=1)
         self.assertEqual(plan.worker, "elevenlabs")
         self.assertEqual(plan.hedge_worker, "gemini_lyra")
+
+
+if __name__ == "__main__":
+    unittest.main()
