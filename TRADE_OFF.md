@@ -485,3 +485,31 @@ Ordered roughly by the day/area they were decided.
   the slim worker container may not have `nvidia-smi` at all).
 - **Not built:** disk usage is shown for the tracks volume only; the spec's per-GPU
   alerting thresholds are not implemented.
+
+### "Now playing" is what playout started feeding FFmpeg, not what viewers hear
+- **Chosen:** the dashboard shows the title, source (worker/provider or filler), and
+  progress of the last track playout logged as started, from its existing
+  `track_start` / `track_end` events. No playout change was needed.
+- **Given up:** (1) **it runs ahead of the audience** - playout decodes into a small
+  pipe that FFmpeg drains in real time, so the logged start is within a second or two
+  of the audio entering the encoder, but YouTube adds its own delay (typically
+  10-30s); a viewer hears the previous song for that long after the dashboard changes;
+  (2) **the title is the file name, not the prompt** - `<prompt-slug>-<id>.mp3` is
+  cleaned into words, so it is truncated to ~60 characters, lowercased and
+  punctuation-free. The full prompt is deliberately not shown on an unauthenticated
+  page; (3) **filler is "not in the tracks table"** - a track is labelled filler when
+  its file is not found there, so a generated file whose DB row is missing would show
+  as filler.
+- **Guarded:** if the last logged track should have ended more than a minute ago with
+  no `track_end`, it reports "unknown (log looks stale)" instead of claiming a dead
+  playout is still playing; an FFmpeg restart or error clears the current track.
+
+### Fixed during this change: stream uptime went "unknown" after ~12-22 hours
+- The Day 17 uptime reader only scanned the last 400 KB of `playout.jsonl`. Every
+  track writes two ~220-byte lines, so a stream running more than roughly 12-22 hours
+  pushed its `ffmpeg_started` line out of that window and the dashboard read
+  "unknown" - exactly when the Day 18 24-hour soak would be looking. Reproduced with
+  realistic log lines (30h up -> "unknown"), then fixed by reading the whole current
+  log plus the rotated `.1` backup (about 10 MB, cached). Uptime and restart count
+  are still limited to what those two files hold (restarts older than that are not
+  counted).

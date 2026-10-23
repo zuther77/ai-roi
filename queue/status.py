@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sqlite3
 import sys
@@ -167,6 +168,102 @@ def tail_lines(path: Path, max_bytes: int = 400_000) -> list[str]:
         data = f.read().decode("utf-8", "replace")
     lines = data.splitlines()
     return lines[1:] if size > max_bytes and lines else lines
+
+
+# playout.jsonl rotates at 5 MB (backupCount 3). Read the current file plus the
+# newest backup, so an `ffmpeg_started` written before a rotation is still seen.
+# ~10 MB per refresh is trivial because responses are cached.
+LOG_READ_BYTES = 6_000_000
+
+
+def read_playout_lines(log_path: Path) -> list[str]:
+    """Oldest-first lines from the rotated backup (if any) then the live file."""
+    lines: list[str] = []
+    for p in (log_path.with_name(log_path.name + ".1"), log_path):
+        if p.exists():
+            lines += tail_lines(p, max_bytes=LOG_READ_BYTES)
+    return lines
+
+
+# --- now playing -----------------------------------------------------------
+
+# Events that mean "whatever was playing is no longer playing".
+_STOP_EVENTS = {"ffmpeg_started", "ffmpeg_error", "ffmpeg_session_end",
+                "container_stop", "container_start", "playlist_complete"}
+_STALE_SLACK_SEC = 60.0
+_GENERATED_SUFFIX = re.compile(r"-(?:[0-9a-f]{8}|\d{8}t\d{6})$")
+
+
+def title_from_filename(name: str) -> str:
+    """Human title from a track file name. Pure.
+
+    Generated tracks are '<prompt-slug>-<jobid8>.<ext>': drop the extension and
+    the id suffix and turn hyphens into spaces. Other names (filler) only lose the
+    extension and get underscores/hyphens turned into spaces.
+    """
+    stem = os.path.splitext(os.path.basename(name or ""))[0]
+    stem = _GENERATED_SUFFIX.sub("", stem)
+    title = re.sub(r"[-_]+", " ", stem).strip()
+    return title[:1].upper() + title[1:] if title else (name or "")
+
+
+def find_now_playing(lines: list[str], now: datetime) -> dict:
+    """What is on air, from playout's track_start / track_end log events. Pure.
+
+    Walks the log oldest-first keeping the current track. A track_end for it, or
+    any event that means FFmpeg/the container restarted, clears it. If the last
+    track_start is older than its own duration plus slack with no track_end, the
+    log is stale (playout died mid-track) and we say so rather than claim the
+    song is still playing.
+    """
+    current = None
+    last = None
+    for line in lines:
+        if '"track_' not in line and not any(f'"{e}"' in line for e in _STOP_EVENTS):
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        event = entry.get("event")
+        if event == "track_start" and entry.get("track"):
+            current = last = {"file": entry["track"], "started_at": entry.get("ts"),
+                              "duration_sec": entry.get("duration_sec")}
+        elif event == "track_end":
+            if current and entry.get("track") == current["file"]:
+                current = None
+        elif event in _STOP_EVENTS:
+            current = None
+
+    if last is None:
+        return {"state": "unknown", "note": "no track has been logged yet"}
+    base = {"file": last["file"], "title": title_from_filename(last["file"]),
+            "duration_sec": last["duration_sec"]}
+    if current is None:
+        return {"state": "between_tracks", **base, "note": "last track finished"}
+    elapsed = uptime_seconds(current["started_at"], now)
+    duration = current["duration_sec"]
+    if elapsed is not None and isinstance(duration, (int, float)) \
+            and elapsed > duration + _STALE_SLACK_SEC:
+        return {"state": "unknown", **base, "elapsed_sec": round(elapsed, 1),
+                "note": "last logged track should have ended already; the "
+                        "playout log looks stale"}
+    return {"state": "playing", **base, "started_at": current["started_at"],
+            "elapsed_sec": None if elapsed is None else round(min(elapsed, duration or elapsed), 1)}
+
+
+def lookup_track_source(store, filename: str) -> str | None:
+    """Which worker/provider generated this file, from the tracks table, or None
+    (filler tracks are not in it). Matches on the file's base name."""
+    like = "%" + filename.replace("\\", "\\\\").replace("%", "\\%")
+    rows = store._exec(
+        "SELECT file_path, source FROM tracks WHERE file_path LIKE ? LIMIT 20",
+        (like,),
+    ).fetchall()
+    for row in rows:
+        if os.path.basename(row["file_path"]) == filename:
+            return row["source"]
+    return None
 
 
 def overall_level(sections: dict) -> str:
@@ -334,7 +431,7 @@ def _json_or_empty(raw: str) -> dict:
 def collect_stream(now: datetime, log_path: Path = PLAYOUT_LOG) -> dict:
     if not log_path.exists():
         return {"state": "unknown", "error": f"playout log not found at {log_path}"}
-    lines = tail_lines(log_path)
+    lines = read_playout_lines(log_path)
     started, count = last_ffmpeg_start(lines)
     if started is None:
         return {"state": "unknown",
@@ -351,6 +448,17 @@ def collect_stream(now: datetime, log_path: Path = PLAYOUT_LOG) -> dict:
         "note": "uptime = time since FFmpeg was last started; it does not prove "
                 "YouTube is receiving data - check Studio for that",
     }
+
+
+def collect_now_playing(store, now: datetime, log_path: Path = PLAYOUT_LOG) -> dict:
+    if not log_path.exists():
+        return {"state": "unknown", "note": f"playout log not found at {log_path}"}
+    info = find_now_playing(read_playout_lines(log_path), now)
+    if info.get("file"):
+        source = lookup_track_source(store, info["file"])
+        info["kind"] = "generated" if source else "filler"
+        info["source"] = source
+    return info
 
 
 def collect_filler(filler_dir: Path = FILLER_DIR, tracks_dir: Path = TRACKS_DIR) -> dict:
@@ -425,6 +533,7 @@ class Collector:
             "queue": safe_section(collect_queue, self.store),
             "workers": workers,
             "providers": providers,
+            "now_playing": safe_section(collect_now_playing, self.store, now),
             "stream": safe_section(collect_stream, now),
             "moderation": safe_section(collect_moderation, self.store, now),
             "failures": failures,
@@ -465,6 +574,7 @@ const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",
 const pill=(t,c)=>'<span class="pill '+c+'">'+esc(t)+'</span>';
 const dur=s=>{if(s==null)return"–";s=Math.round(s);const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);
   return(d?d+"d ":"")+(h||d?h+"h ":"")+m+"m "+(s%60)+"s"};
+const clock=s=>{if(s==null)return"–";s=Math.round(s);return Math.floor(s/60)+":"+String(s%60).padStart(2,"0")};
 const pct=x=>x==null?"–":(x*100).toFixed(1)+"%";
 const num=(x,u)=>x==null?"–":x+(u||"");
 const row=(k,v)=>'<tr><th>'+esc(k)+'</th><td>'+v+'</td></tr>';
@@ -474,6 +584,14 @@ function render(d){
   b.textContent={ok:"All systems nominal",warn:"Attention needed",down:"Stream is down"}[d.level]||d.level;
   $("meta").textContent="updated "+d.generated_at+" · refreshes every 5s";
   let h="";
+  const np=d.now_playing;
+  if(np.error){h+=sect("Now playing",np)}
+  else if(np.state==="playing"){h+=sect("Now playing",row("song",'<strong style="font-size:1.1em">'+esc(np.title)+'</strong>')
+    +row("source",esc(np.kind==="generated"?"generated by "+(np.source||"?"):"filler pool"))
+    +row("progress",clock(np.elapsed_sec)+" / "+clock(np.duration_sec))
+    +row("file",'<span class="muted">'+esc(np.file)+'</span>'))}
+  else{h+=sect("Now playing",row("state",pill(np.state==="between_tracks"?"between tracks":"unknown",np.state==="between_tracks"?"idle":"unknown"))
+    +(np.title?row("last track",esc(np.title)):"")+'<tr><td colspan=2 class="muted">'+esc(np.note||"")+'</td></tr>')}
   h+=sect("Mode",row("generation mode",esc(d.mode.generation_mode))+row("configured providers",esc(d.mode.configured_providers.join(", ")||"none"))
     +row("local min length",esc(d.mode.local_min_duration_sec))+row("provider length",esc(d.mode.provider_duration_sec)));
   const q=d.queue; h+=q.error?sect("Queue",q):sect("Queue",row("depth (queued+generating+ready)",

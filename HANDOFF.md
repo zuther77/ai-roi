@@ -456,8 +456,11 @@ reads `unknown` until playout is rebuilt/restarted), and the worker heartbeats
 carry optional `thermal` (Mac) / `temperature_c` (DELL) via `worker/telemetry.py`.
 Numbers worth cross-checking by hand before trusting them: queue depth vs a
 `SELECT COUNT(*)`, reject rate vs the `prompts` table. See TRADE_OFF.md "Status
-dashboard (Day 17)" for what each figure does and does not mean. 249 queue + 83
+dashboard (Day 17)" for what each figure does and does not mean. 274 queue + 83
 worker + 9 playout tests. DELL stays parked.
+Added after request: a "Now playing" block (song title, generated-by/filler, progress),
+read from playout's existing track_start/track_end events; also fixed stream uptime going
+"unknown" after ~12-22h on a long log (see TRADE_OFF.md).
 
 ---
 

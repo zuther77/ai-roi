@@ -349,5 +349,200 @@ class CollectorAndHttpTest(unittest.TestCase):
             server.shutdown(); server.server_close()
 
 
+def ev(event, ts, **kw):
+    """A log line in the exact shape playout's JsonLineFormatter emits."""
+    return json.dumps({"ts": ts.isoformat(), "level": "INFO", "logger": "playout",
+                       "message": kw.pop("message", event), "event": event, **kw})
+
+
+class TitleTest(unittest.TestCase):
+    def test_generated_names_lose_extension_and_id(self):
+        self.assertEqual(status.title_from_filename("rainy-lofi-piano-3fa85f64.mp3"), "Rainy lofi piano")
+
+    def test_timestamp_suffix_is_removed_too(self):
+        self.assertEqual(status.title_from_filename("lofi-beat-20261021t003938.mp3"), "Lofi beat")
+
+    def test_filler_names_only_get_cleaned_up(self):
+        self.assertEqual(status.title_from_filename("Chill_Lofi_Beats_03.mp3"), "Chill Lofi Beats 03")
+
+    def test_a_name_that_is_all_suffix_still_returns_something(self):
+        self.assertTrue(status.title_from_filename("track-3fa85f64.mp3"))
+
+    def test_garbage_does_not_crash(self):
+        for value in ("", None, "no-extension", "...mp3"):
+            with self.subTest(value=value):
+                self.assertIsInstance(status.title_from_filename(value), str)
+
+
+class NowPlayingTest(unittest.TestCase):
+    def at(self, seconds_ago):
+        return NOW - timedelta(seconds=seconds_ago)
+
+    def test_a_started_track_is_playing_with_progress(self):
+        lines = [ev("track_start", self.at(72), track="a-3fa85f64.mp3", duration_sec=180.0)]
+        n = status.find_now_playing(lines, NOW)
+        self.assertEqual((n["state"], n["file"], n["title"]), ("playing", "a-3fa85f64.mp3", "A"))
+        self.assertEqual((n["elapsed_sec"], n["duration_sec"]), (72.0, 180.0))
+
+    def test_the_latest_track_wins(self):
+        lines = [ev("track_start", self.at(300), track="old-11111111.mp3", duration_sec=100),
+                 ev("track_end", self.at(200), track="old-11111111.mp3"),
+                 ev("track_start", self.at(10), track="new-22222222.mp3", duration_sec=100)]
+        self.assertEqual(status.find_now_playing(lines, NOW)["file"], "new-22222222.mp3")
+
+    def test_after_track_end_it_is_between_tracks(self):
+        lines = [ev("track_start", self.at(120), track="a-33333333.mp3", duration_sec=100),
+                 ev("track_end", self.at(20), track="a-33333333.mp3")]
+        n = status.find_now_playing(lines, NOW)
+        self.assertEqual(n["state"], "between_tracks")
+        self.assertEqual(n["title"], "A")
+
+    def test_an_ffmpeg_restart_clears_the_current_track(self):
+        lines = [ev("track_start", self.at(30), track="a-44444444.mp3", duration_sec=100),
+                 ev("ffmpeg_started", self.at(5))]
+        self.assertEqual(status.find_now_playing(lines, NOW)["state"], "between_tracks")
+
+    def test_an_ffmpeg_error_clears_it_too(self):
+        lines = [ev("track_start", self.at(30), track="a-55555555.mp3", duration_sec=100),
+                 ev("ffmpeg_error", self.at(5))]
+        self.assertEqual(status.find_now_playing(lines, NOW)["state"], "between_tracks")
+
+    def test_a_dead_playout_is_not_reported_as_still_playing(self):
+        # started 10 minutes ago, 100s long, never ended: the log is stale
+        lines = [ev("track_start", self.at(600), track="a-66666666.mp3", duration_sec=100)]
+        n = status.find_now_playing(lines, NOW)
+        self.assertEqual(n["state"], "unknown")
+        self.assertIn("stale", n["note"])
+
+    def test_a_slightly_overrunning_track_is_still_playing(self):
+        lines = [ev("track_start", self.at(130), track="a-77777777.mp3", duration_sec=100)]
+        n = status.find_now_playing(lines, NOW)
+        self.assertEqual(n["state"], "playing")
+        self.assertEqual(n["elapsed_sec"], 100.0)           # never shows past the end
+
+    def test_ending_a_different_track_does_not_clear_this_one(self):
+        lines = [ev("track_start", self.at(30), track="a-88888888.mp3", duration_sec=100),
+                 ev("track_end", self.at(5), track="some-other-99999999.mp3")]
+        self.assertEqual(status.find_now_playing(lines, NOW)["state"], "playing")
+
+    def test_empty_log(self):
+        self.assertEqual(status.find_now_playing([], NOW)["state"], "unknown")
+
+    def test_garbage_lines_are_skipped(self):
+        lines = ["not json", '{"event": "track_start"}',
+                 ev("track_start", self.at(5), track="a-aaaaaaaa.mp3", duration_sec=100)]
+        self.assertEqual(status.find_now_playing(lines, NOW)["file"], "a-aaaaaaaa.mp3")
+
+
+class NowPlayingSectionTest(unittest.TestCase):
+    def setUp(self):
+        self.store = memory_store()
+        self.store._exec(
+            "INSERT INTO tracks (id,file_path,duration_sec,source,generation_time_sec,is_filler,validated)"
+            " VALUES ('t1','/srv/radio/tracks/afro-phonk-4b5e8576.mp3',180,'elevenlabs',9,0,0)")
+
+    def log(self, *events):
+        d = tempfile.TemporaryDirectory(); self.addCleanup(d.cleanup)
+        p = Path(d.name) / "playout.jsonl"
+        p.write_text("\n".join(events) + "\n")
+        return p
+
+    def test_generated_track_is_attributed_to_its_source(self):
+        p = self.log(ev("track_start", NOW - timedelta(seconds=10),
+                        track="afro-phonk-4b5e8576.mp3", duration_sec=180))
+        n = status.collect_now_playing(self.store, NOW, p)
+        self.assertEqual((n["kind"], n["source"]), ("generated", "elevenlabs"))
+
+    def test_a_track_not_in_the_db_is_filler(self):
+        p = self.log(ev("track_start", NOW - timedelta(seconds=10),
+                        track="Chill_Lofi_Beats_03.mp3", duration_sec=200))
+        n = status.collect_now_playing(self.store, NOW, p)
+        self.assertEqual((n["kind"], n["source"]), ("filler", None))
+
+    def test_a_same_named_file_in_another_dir_is_matched_by_basename_only(self):
+        self.store._exec(
+            "INSERT INTO tracks (id,file_path,duration_sec,source,generation_time_sec,is_filler,validated)"
+            " VALUES ('t2','/srv/radio/tracks/x_ap-phonk-4b5e8576.mp3',1,'dell',1,0,0)")
+        p = self.log(ev("track_start", NOW, track="afro-phonk-4b5e8576.mp3", duration_sec=180))
+        self.assertEqual(status.collect_now_playing(self.store, NOW, p)["source"], "elevenlabs")
+
+    def test_wildcard_characters_in_a_name_do_not_match_other_files(self):
+        self.assertIsNone(status.lookup_track_source(self.store, "afro_phonk-4b5e8576.mp3"))
+        self.assertIsNone(status.lookup_track_source(self.store, "%"))
+
+    def test_missing_log_is_a_note_not_an_error(self):
+        n = status.collect_now_playing(self.store, NOW, Path("/nonexistent/playout.jsonl"))
+        self.assertEqual(n["state"], "unknown")
+        self.assertNotIn("error", n)       # must not turn the whole banner amber
+
+    def test_prompt_text_beyond_the_filename_is_never_exposed(self):
+        self.store.enqueue("SECRET FULL PROMPT TEXT THAT IS MUCH LONGER THAN THE FILE NAME SLUG")
+        p = self.log(ev("track_start", NOW, track="afro-phonk-4b5e8576.mp3", duration_sec=180))
+        self.assertNotIn("SECRET", json.dumps(status.collect_now_playing(self.store, NOW, p)))
+
+
+class LongLogRegressionTest(unittest.TestCase):
+    """Day 17 bug: only the last 400 KB of the log was read, so after ~22h of
+    90s tracks the ffmpeg_started line scrolled out and uptime read 'unknown'."""
+
+    def build(self, d, hours):
+        p = Path(d) / "playout.jsonl"
+        start = datetime.now(timezone.utc) - timedelta(hours=hours)
+        lines, t = [ev("ffmpeg_started", start)], start
+        for i in range(hours * 40):
+            t += timedelta(seconds=90)
+            name = f"k-pop-girl-group-newjeans-ditto-omg-era-minimal-trap-beat-80-{i:08x}.mp3"
+            lines += [ev("track_start", t, track=name, duration_sec=90.024),
+                      ev("track_end", t + timedelta(seconds=90), track=name)]
+        p.write_text("\n".join(lines) + "\n")
+        return p
+
+    def test_uptime_survives_a_log_larger_than_the_old_window(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self.build(d, 30)
+            self.assertGreater(p.stat().st_size, 400_000)     # the case that used to break
+            s = status.collect_stream(datetime.now(timezone.utc), p)
+        self.assertEqual(s["state"], "up")
+        self.assertAlmostEqual(s["uptime_sec"] / 3600, 30, delta=0.01)
+
+    def test_uptime_survives_log_rotation(self):
+        with tempfile.TemporaryDirectory() as d:
+            cur = Path(d) / "playout.jsonl"
+            Path(d, "playout.jsonl.1").write_text(ev("ffmpeg_started", NOW - timedelta(hours=70)) + "\n")
+            cur.write_text(ev("track_start", NOW, track="a-11111111.mp3", duration_sec=90) + "\n")
+            s = status.collect_stream(NOW, cur)
+        self.assertEqual(s["state"], "up")
+        self.assertAlmostEqual(s["uptime_sec"] / 3600, 70, delta=0.01)
+
+    def test_now_playing_is_still_correct_on_a_long_log(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self.build(d, 30)
+            n = status.find_now_playing(status.read_playout_lines(p), datetime.now(timezone.utc))
+        self.assertIn(n["state"], ("between_tracks", "playing"))
+
+
+class NowPlayingPageTest(unittest.TestCase):
+    def test_collector_includes_it_and_the_page_renders_it(self):
+        import re, shutil, subprocess
+        store = memory_store()
+        c = status.Collector(store, lambda: FakeRedis(), env={})
+        data = c.snapshot()
+        self.assertIn("now_playing", data)
+        self.assertIn("Now playing", status.PAGE)
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not installed")
+        data["now_playing"] = {"state": "playing", "title": "Afro phonk 140 bpm", "file": "afro-4b5e8576.mp3",
+                               "kind": "generated", "source": "elevenlabs", "elapsed_sec": 72, "duration_sec": 180}
+        script = re.search(r"<script>(.*)</script>", status.PAGE, re.S).group(1)
+        script = script.replace("tick();setInterval(tick,5000);", "")
+        js = ("const els={};global.document={getElementById:id=>els[id]||(els[id]={className:'',textContent:'',innerHTML:''})};\n"
+              + script + "\nrender(" + json.dumps(data, default=str) + ");\nconsole.log(els.out.innerHTML);")
+        out = subprocess.run([node, "-e", js], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        for expected in ("Afro phonk 140 bpm", "generated by elevenlabs", "1:12 / 3:00", "afro-4b5e8576.mp3"):
+            self.assertIn(expected, out.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
