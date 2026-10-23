@@ -458,6 +458,10 @@ Numbers worth cross-checking by hand before trusting them: queue depth vs a
 `SELECT COUNT(*)`, reject rate vs the `prompts` table. See TRADE_OFF.md "Status
 dashboard (Day 17)" for what each figure does and does not mean. 274 queue + 83
 worker + 9 playout tests. DELL stays parked.
+DEPLOYING a dashboard change: `status` runs code from a bind mount, so `docker compose up -d
+--build status` does NOT restart it (Compose sees no config change) and the old version keeps
+serving. Use `docker compose restart status`. (playout bakes its code into the image, so it
+needs `--build`.)
 Added after request: a "Now playing" block (song title, generated-by/filler, progress),
 read from playout's existing track_start/track_end events; also fixed stream uptime going
 "unknown" after ~12-22h on a long log (see TRADE_OFF.md).

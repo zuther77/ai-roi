@@ -521,6 +521,31 @@ class LongLogRegressionTest(unittest.TestCase):
         self.assertIn(n["state"], ("between_tracks", "playing"))
 
 
+class LogPathResolutionTest(unittest.TestCase):
+    """The playout log path was bound as a default argument at import time, so
+    overriding PLAYOUT_LOG (env or test) was silently ignored and the section
+    reported 'log not found'. It must be resolved when the section is built."""
+
+    def test_the_configured_path_is_used_by_the_http_collector(self):
+        # Collector.snapshot() uses the real clock, so build the log on real time.
+        real_now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "playout.jsonl"
+            log.write_text("\n".join([
+                ev("ffmpeg_started", real_now - timedelta(minutes=5)),
+                ev("track_start", real_now - timedelta(seconds=20),
+                   track="rainy-lofi-piano-3fa85f64.mp3", duration_sec=90.0)]) + "\n")
+            saved = status.PLAYOUT_LOG
+            status.PLAYOUT_LOG = log
+            try:
+                data = status.Collector(memory_store(), lambda: FakeRedis(), env={}).snapshot()
+            finally:
+                status.PLAYOUT_LOG = saved
+        self.assertEqual(data["now_playing"]["state"], "playing")
+        self.assertEqual(data["now_playing"]["title"], "Rainy lofi piano")
+        self.assertEqual(data["stream"]["state"], "up")
+
+
 class NowPlayingPageTest(unittest.TestCase):
     def test_collector_includes_it_and_the_page_renders_it(self):
         import re, shutil, subprocess

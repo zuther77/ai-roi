@@ -428,7 +428,8 @@ def _json_or_empty(raw: str) -> dict:
         return {}
 
 
-def collect_stream(now: datetime, log_path: Path = PLAYOUT_LOG) -> dict:
+def collect_stream(now: datetime, log_path: Path | None = None) -> dict:
+    log_path = log_path or PLAYOUT_LOG
     if not log_path.exists():
         return {"state": "unknown", "error": f"playout log not found at {log_path}"}
     lines = read_playout_lines(log_path)
@@ -450,7 +451,8 @@ def collect_stream(now: datetime, log_path: Path = PLAYOUT_LOG) -> dict:
     }
 
 
-def collect_now_playing(store, now: datetime, log_path: Path = PLAYOUT_LOG) -> dict:
+def collect_now_playing(store, now: datetime, log_path: Path | None = None) -> dict:
+    log_path = log_path or PLAYOUT_LOG
     if not log_path.exists():
         return {"state": "unknown", "note": f"playout log not found at {log_path}"}
     info = find_now_playing(read_playout_lines(log_path), now)
