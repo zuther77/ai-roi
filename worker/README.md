@@ -306,22 +306,3 @@ prompts — and the two sides of a hedged item — from colliding. Prompts with 
 Latin letters fall back to `track-<jobid8>`. While a file is being written you
 only ever see `<name>.tmp.<ext>`, never a partial file under the final name.
 Tracks generated before this convention keep their old names.
-
-## Acceptance tests
-
-1. `nvidia-smi` inside the CUDA test container shows the RTX 2060.
-2. Master: `./worker/push_test_job.sh` (or edit the script's `prompt`), Windows
-   logs `job_claimed` -> `job_done` with `generation_sec`, and a playable file
-   appears in the master's `/srv/radio/tracks`.
-3. During generation, `watch -n1 ls /srv/radio/tracks` on the master: you must
-   only ever see the `.tmp` name mid-write.
-4. Record the real `generation_sec` for a 30 s clip.
-
-## Known notes
-
-- Job failures are logged, cleaned up (partial `.tmp` files unlinked), and
-  acked. The master's queue-reaper is the safety net for the cases the worker
-  cannot report itself: it requeues any job whose lease expired because the
-  worker died, the link dropped, or it failed silently.
-- Old Windows timing baselines from the pre-1.5 engine (1365.55 s, 1400.3 s) are
-  void: different engine, different step defaults (8 on 1.5-turbo vs 60).
