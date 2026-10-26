@@ -628,6 +628,11 @@ read code from the host, so `up -d --build` does NOT restart them — Compose
 sees no config change. Use `docker compose restart <service>`. `playout` bakes
 its code into the image and does need `--build`.
 
+Compose publishes Redis on the master's static LAN address, and binding fails
+if that interface is absent — so a clone running anywhere else must set
+`REDIS_BIND` (127.0.0.1, or 0.0.0.0 to serve any interface). Unset keeps this
+master's behaviour.
+
 ### Still open
 
 * **YouTube chat replies** — implemented, never manually tested against a live

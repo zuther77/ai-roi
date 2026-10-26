@@ -98,8 +98,12 @@ services:
     #   * Legacy direct link (192.168.50.1) — NIC still configured; kept
     #     until the link is physically retired.
     # Binding fails if an interface is down — deliberate, not a bug.
+    # REDIS_BIND exists so a fresh clone can bring the stack up on a machine
+    # that is not this master (set it to 127.0.0.1, or 0.0.0.0 to serve any
+    # interface). The default is the master's static LAN address, so leaving
+    # it unset keeps the existing deployment behaviour exactly.
     ports:
-      - "192.168.1.210:6379:6379"
+      - "${REDIS_BIND:-192.168.1.210}:6379:6379"
 
     # Day 6: queue persistence. appendonly + a named volume so pending and
     # in-progress jobs survive a Redis restart (the Day 4 skeleton accepted
