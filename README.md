@@ -8,10 +8,6 @@ The requirement everything else is designed around: **the stream never stops.**
 With every generation source dead — no workers, no API keys, no internet to the
 providers — the master keeps broadcasting from its local filler pool.
 
-**Status:** feature-complete (days 1-17 of an 18-day plan; the 24-hour soak is
-the remaining step). Runs live. See [HANDOFF.md](HANDOFF.md) for the full state,
-and section 10 there for what is still open.
-
 ## How it works
 
 ```
@@ -139,8 +135,6 @@ generations.
 
 | Document | What it covers |
 |---|---|
-| [HANDOFF.md](HANDOFF.md) | Pick-up-cold guide: current state, per-day history, verification status, open items |
-| [TRADE_OFF.md](TRADE_OFF.md) | Every significant decision, what was given up, and why |
 | [worker/README.md](worker/README.md) | Worker runbooks, environment table, failure tests |
 | [worker/setup.md](worker/setup.md) | One-time master + worker setup (static IP, NFS, mounts) |
 | [tests/README.md](tests/README.md) | Test layout and what each area covers |
