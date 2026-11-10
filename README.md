@@ -70,8 +70,10 @@ Requires Docker + Compose. Zero API keys needed to get a stream up.
 ```sh
 git clone <this repo> && cd ai-roi
 cp .env.example .env          # set YOUTUBE_STREAM_KEY
-                              # set REDIS_BIND=127.0.0.1 unless you are the
-                              #   master whose static address is the default
+                              # set MASTER_IP to this machine's LAN address
+                              #   only if workers on other machines will
+                              #   connect (see worker/setup.md Step 1);
+                              #   unset, Redis listens on loopback only
                               # drop a few .mp3 files into filler-pool/audio/
 docker compose up -d --build
 docker compose logs -f playout

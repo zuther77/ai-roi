@@ -8,7 +8,8 @@ attached at /Volumes/radio-tracks.
     cd /path/to/ai-roi
     PYTHONUNBUFFERED=1 python3 worker/mac_claim.py
 
-REDIS_URL and REDIS_PASSWORD come from the environment (same values as .env).
+MASTER_IP (or REDIS_URL) and REDIS_PASSWORD come from the environment,
+the same values as .env.
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ sys.path.insert(0, str(ROOT / "queue"))
 sys.path.insert(0, str(ROOT / "worker"))
 
 from mac_worker import MacWorker  # noqa: E402
+from redis_client import redis_url_from_env  # noqa: E402
 from reaper import MiniRedis  # noqa: E402
 from telemetry import Cached, mac_thermal  # noqa: E402
 
@@ -43,7 +45,6 @@ LEASE_PREFIX = "job:lease:"
 CANCEL_PREFIX = "job:cancel:"
 CLAIM_TIMEOUT_SEC = 5
 HEARTBEAT_SEC = 5
-DEFAULT_REDIS_URL = "redis://192.168.1.210:6379/0"
 EXPECTED_SEC_PER_TARGET_SEC = 50
 MIN_LEASE_SEC = 120
 
@@ -142,7 +143,11 @@ def handle_job(r, worker: MacWorker, raw: str, busy: dict) -> None:
 
 
 def main() -> int:
-    url = os.environ.get("REDIS_URL", DEFAULT_REDIS_URL)
+    url = redis_url_from_env()
+    if not url:
+        log("worker_start_error",
+            reason="master address not set: set MASTER_IP (or REDIS_URL)")
+        return 2
     password = os.environ.get("REDIS_PASSWORD", "")
     if not password:
         log("worker_start_error", reason="REDIS_PASSWORD not set")

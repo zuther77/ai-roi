@@ -44,12 +44,14 @@ Unit tests live in `tests/worker/`; run them from the repo root with
 NFS export, and this worker's mount. Two checks before starting a worker:
 
 ```sh
-nc -vz 192.168.1.210 6379        # master's Redis (Compose) is reachable
+nc -vz "$MASTER_IP" 6379        # master's Redis (Compose) is reachable
 findmnt /mnt/radio-tracks        # the export is mounted (macOS: mount | grep radio-tracks)
 ```
 
 Workers run plain DHCP and self-register, so no worker address is configured
-anywhere — the master's `192.168.1.210` is the only address in the system.
+anywhere. The master's address, `MASTER_IP`, is the only one in the system:
+export it on the worker (the same value as in the master's `.env`), and the
+Redis URL and NFS source are derived from it.
 
 ## Checkpoints (model weights — NOT in the git repo)
 
@@ -103,10 +105,9 @@ docker logs -f acestep   # first start: checkpoint download + init. The banner
 docker run --rm --gpus all --cap-add SYS_ADMIN --network radio-net \
   --name ai-roi-worker \
   -p 8001:8001 \
-  -e REDIS_URL=redis://192.168.1.210:6379/0 \
+  -e MASTER_IP="$MASTER_IP" \
   -e REDIS_PASSWORD=<from master's .env> \
   -e WORKER_SHARED_SECRET=<from master's .env> \
-  -e NFS_SOURCE=192.168.1.210:/srv/radio/tracks \
   -e ACESTEP_API_URL=http://acestep:8001 \
   -v <path-to>/ai-roi/worker:/app/worker:ro \
   ai-roi-worker
@@ -140,11 +141,12 @@ Notes:
 
 | Env var | Default | Notes |
 |---|---|---|
-| `REDIS_URL` | `redis://192.168.1.210:6379/0` | master's LAN address |
+| `MASTER_IP` | — | **required** (or both `REDIS_URL` and `NFS_SOURCE`): the master's LAN address. The worker exits at startup if none is set |
+| `REDIS_URL` | `redis://$MASTER_IP:6379/0` | override only if Redis is not on the master's default port |
 | `REDIS_PASSWORD` | — | required, from master's `.env` |
 | `ACESTEP_API_URL` | `http://127.0.0.1:8001` | the acestep15 server; on Windows use `http://acestep:8001` |
 | `TRACKS_DIR` | `/app/tracks` | mount point for `NFS_SOURCE`, atomic rename target |
-| `NFS_SOURCE` | `192.168.1.210:/srv/radio/tracks` | master's export, mounted inside the container at startup |
+| `NFS_SOURCE` | `$MASTER_IP:/srv/radio/tracks` | master's export, mounted inside the container at startup |
 | `WORKER_MOUNT_NFS` | `1` | set `0` only when `TRACKS_DIR` is already a mount |
 | `WORKER_SHARED_SECRET` | — | required by `/health` (`x-worker-secret` header) |
 | `WORKER_HEALTH_PORT` | `8001` | `/health` listener; publish with `-p 8001:8001` |
@@ -175,7 +177,7 @@ worker can reclaim it. With production defaults that is ~2.5 h for a 60 s job.
 Health check (from the master or Windows):
 
 ```sh
-curl -m 5 -H "x-worker-secret: <WORKER_SHARED_SECRET>" http://192.168.1.51:8001/health
+curl -m 5 -H "x-worker-secret: <WORKER_SHARED_SECRET>" http://<worker-ip>:8001/health
 ```
 
 `{"status": "ok", "gpu_available": true, "model_loaded": true}` once ready;
@@ -242,14 +244,14 @@ model server still up in its own terminal:
 
 ```sh
 cd <path-to>/ai-roi
-PYTHONUNBUFFERED=1 python3 worker/mac_claim.py
+MASTER_IP=<master-ip> REDIS_PASSWORD=<from .env> PYTHONUNBUFFERED=1 python3 worker/mac_claim.py
 ```
 
 It claims from `jobs:pending:mac`, heartbeats `worker:mac`, and writes finished
 tracks to `MAC_OUTPUT_DIR`, which it defaults to the `/Volumes/radio-tracks`
 NFS mount from `setup.md`. `REDIS_PASSWORD` must be in its environment or it
-exits; `REDIS_URL` defaults to the master. System python is fine, since it is
-stdlib-only.
+exits, and so does a missing `MASTER_IP` (or `REDIS_URL`). System python is fine,
+since it is stdlib-only.
 
 ## Generated track file names
 

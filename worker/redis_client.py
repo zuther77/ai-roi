@@ -8,11 +8,36 @@ handful of commands these scripts issue.
 
 from __future__ import annotations
 
+import os
 import socket
 from urllib.parse import unquote, urlparse
 
 CONNECT_TIMEOUT_SEC = 10.0
 RECV_BYTES = 65536
+REDIS_PORT = 6379
+NFS_EXPORT_PATH = "/srv/radio/tracks"
+
+
+def redis_url_from_env(environ=None) -> str | None:
+    """Where to reach the master's Redis: REDIS_URL if set, else built from
+    MASTER_IP. None when neither is set; callers fail loudly rather than
+    guess an address that may belong to someone else's network."""
+    env = os.environ if environ is None else environ
+    explicit = env.get("REDIS_URL", "").strip()
+    if explicit:
+        return explicit
+    master = env.get("MASTER_IP", "").strip()
+    return f"redis://{master}:{REDIS_PORT}/0" if master else None
+
+
+def nfs_source_from_env(environ=None) -> str | None:
+    """The master's NFS export: NFS_SOURCE if set, else built from MASTER_IP."""
+    env = os.environ if environ is None else environ
+    explicit = env.get("NFS_SOURCE", "").strip()
+    if explicit:
+        return explicit
+    master = env.get("MASTER_IP", "").strip()
+    return f"{master}:{NFS_EXPORT_PATH}" if master else None
 
 
 class RedisError(Exception):

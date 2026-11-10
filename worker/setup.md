@@ -16,22 +16,40 @@ Addressing (spec v0.4.2 — near-zero bookkeeping):
 
 | Machine | Address | Notes |
 |---|---|---|
-| Master (Linux box) | `192.168.1.210` | static, set at the OS level (Step 2) |
+| Master (Linux box) | `$MASTER_IP` | static, set at the OS level (Steps 1-2); your choice, never hardcoded in the repo |
 | Any worker | plain DHCP | workers are never referenced by address — they connect to the master and self-register (worker registry); no router configuration for anyone |
 
-One address in the whole system: the master's. Everything below assumes
-it; substitute if you choose a different one.
+One address in the whole system: the master's. It is the single value you
+choose (`MASTER_IP`); the repo has no address of its own, so nothing needs
+editing when you change routers or networks. Every command below uses shell
+variables, defined once in Step 1.
 
 ---
 
 ## Part 1 — Master side (once, needs sudo)
 
-**Step 1 — Confirm the master's LAN address on the worker network.**
+**Step 1 — Read your network, then name the three values.**
 
 ```sh
-ip -4 -brief addr        # the Wi-Fi/LAN interface should show 192.168.1.210/24
-ip route                 # default via 192.168.1.1 — that's your home router
+ip route                 # "default via X" is your router (GATEWAY)
+ip -4 -brief addr        # your LAN interface and its current address
 ```
+
+The master's address must be **inside the subnet your router serves**. A
+static address from a different subnet cannot reach the router, so the
+machine loses the internet and the LAN. This happened here after a router
+swap changed the network from `192.168.1.x` to `10.0.0.x`. Pick a free
+address outside the router's DHCP pool, in the same subnet as the gateway.
+Example values (use your own):
+
+```sh
+export MASTER_IP=10.0.0.210       # free address on your router's subnet
+export GATEWAY=10.0.0.1           # the "default via" address above
+export LAN_SUBNET=10.0.0.0/24     # your network; /24 is the common home size
+```
+
+Keep this shell open for Parts 1-3, or re-run these three lines in a new one.
+Put the same `MASTER_IP` in the repo's `.env` too (Redis is published on it).
 
 **Step 2 — Fix the master's address at the OS level (no router).** The
 architecture is pull-based: workers connect TO the master (Redis, NFS)
@@ -41,12 +59,16 @@ master needs to be stable:
 ```sh
 nmcli con show --active                  # note your Wi-Fi connection name
 nmcli con mod "<your-wifi-connection>" ipv4.method manual \
-  ipv4.addresses 192.168.1.210/24 ipv4.gateway 192.168.1.1 ipv4.dns 192.168.1.1
+  ipv4.addresses "$MASTER_IP/24" ipv4.gateway "$GATEWAY" \
+  ipv4.dns "1.1.1.1 8.8.8.8" ipv4.ignore-auto-dns yes
 nmcli con up "<your-wifi-connection>"
-ip -4 -brief addr                        # confirm it now holds .210
+ip -4 -brief addr                        # confirm it now holds $MASTER_IP
+ping -c2 1.1.1.1 && nslookup registry-1.docker.io    # internet + DNS still work
 ```
 
-(The GUI equivalent: Settings -> Wi-Fi -> your network -> IPv4 -> Manual.)
+Public DNS servers are used on purpose: some home routers drop DNS queries
+from containers, which breaks `docker build` with a lookup timeout. (The GUI
+equivalent: Settings -> Wi-Fi -> your network -> IPv4 -> Manual.)
 
 **Step 3 — Install and configure the NFS server** (skip the install line
 if already done — it is on this master):
@@ -71,9 +93,9 @@ exported first:
 cat /etc/exports
 ```
 
-An older line scoped to a single address (`192.168.50.2`) may still be there
-from the retired direct Ethernet link. It is harmless; remove it whenever
-convenient.
+A line left over from an earlier network (a single old address, or an old
+subnet after a router change) is harmless but dead. Remove it whenever
+convenient; it does not grant access on the new network.
 
 Export to the **whole LAN subnet** — accepted by the owner (2026-10-04,
 spec v0.4.2): this system targets single-household Wi-Fi, root_squash +
@@ -82,7 +104,7 @@ tracks, and no new-worker bookkeeping ever happens. Add the line if your
 `/etc/exports` lacks one for the LAN:
 
 ```sh
-echo '/srv/radio/tracks 192.168.1.0/24(rw,sync,no_subtree_check,insecure)' | sudo tee -a /etc/exports
+echo "/srv/radio/tracks ${LAN_SUBNET}(rw,sync,no_subtree_check,insecure)" | sudo tee -a /etc/exports
 sudo exportfs -ra
 ```
 
@@ -95,10 +117,16 @@ was added (Sprint 2).
 **Step 5 — Verify the server is listening and exporting:**
 
 ```sh
-showmount -e 192.168.1.210
-# must list: /srv/radio/tracks  192.168.1.0/24
+showmount -e "$MASTER_IP"
+# must list: /srv/radio/tracks  <your LAN_SUBNET>
 ss -tln | grep -E ':(2049|111)\b'      # nfsd + portmapper listening
 ```
+
+`showmount` is a convenience check, not the real test. If it prints
+`RPC: Unable to receive`, rpcbind or mountd is stopped or firewalled
+(`systemctl enable --now rpcbind nfs-kernel-server`, then Step 6); an
+NFSv4-only server also fails it while mounting works. The real proof is the
+mount and the probe file in Parts 2-3.
 
 **Step 6 — Firewall check** (only if you run one; this master did not
 have one blocking LAN by default):
@@ -106,16 +134,24 @@ have one blocking LAN by default):
 ```sh
 sudo ufw status
 # if "active", allow the LAN subnet (workers are DHCP; their IPs are not fixed):
-sudo ufw allow from 192.168.1.0/24 to any port 2049
+sudo ufw allow from "$LAN_SUBNET" to any port 2049
+sudo ufw allow from "$LAN_SUBNET" to any port 111      # portmapper: NFSv3 + showmount
 ```
 
 The master side is done. Leave Redis to `docker compose up -d` as usual —
 a worker that can also reach the queue will additionally pass
-`nc -vz 192.168.1.210 6379` (bonus check, not needed for the NFS test).
+`nc -vz "$MASTER_IP" 6379` (bonus check, not needed for the NFS test).
 
 ---
 
 ## Part 2 — Worker side, per OS
+
+On the worker, set the master's address once per shell (the same
+`MASTER_IP` as Step 1; the worker needs no other value):
+
+```sh
+export MASTER_IP=10.0.0.210
+```
 
 ### Windows worker (Windows Home: WSL2 is the NFS client)
 
@@ -125,13 +161,14 @@ ships the NFS client — verified). In a WSL terminal:
 ```sh
 sudo apt-get update && sudo apt-get install -y nfs-common   # mount helper
 sudo mkdir -p /mnt/radio-tracks
-sudo mount -t nfs 192.168.1.210:/srv/radio/tracks /mnt/radio-tracks
+sudo mount -t nfs "$MASTER_IP:/srv/radio/tracks" /mnt/radio-tracks
 findmnt /mnt/radio-tracks        # proves the mount is live
 ```
 
 Notes, both learned the hard way on this project:
 - The mount must be re-done after each WSL restart (add the `mount`
-  line to `/etc/fstab` to automate: `192.168.1.210:/srv/radio/tracks
+  line to `/etc/fstab` to automate, with the master's literal address since
+  fstab does not expand shell variables: `<master-ip>:/srv/radio/tracks
   /mnt/radio-tracks nfs defaults 0 0`).
 - **Docker containers on this machine cannot bind-mount this path**
   (`timed out waiting ... to be automounted` — a Docker Desktop WSL2
@@ -158,9 +195,9 @@ with a permission error that looks like a bad export.
 
 ```sh
 sudo mkdir -p /Volumes/radio-tracks
-sudo mount_nfs -o vers=3 192.168.1.210:/srv/radio/tracks /Volumes/radio-tracks
+sudo mount_nfs -o vers=3 "$MASTER_IP:/srv/radio/tracks" /Volumes/radio-tracks
 # if the mount is refused, retry with a privileged source port:
-sudo mount_nfs -o vers=3,resvport 192.168.1.210:/srv/radio/tracks /Volumes/radio-tracks
+sudo mount_nfs -o vers=3,resvport "$MASTER_IP:/srv/radio/tracks" /Volumes/radio-tracks
 mount | grep radio-tracks        # proves the mount is live
 ```
 
@@ -173,7 +210,7 @@ is only needed if the server's `insecure` option is removed.
 ```sh
 sudo apt-get install -y nfs-common       # or nfs-utils on some distros
 sudo mkdir -p /mnt/radio-tracks
-sudo mount -t nfs 192.168.1.210:/srv/radio/tracks /mnt/radio-tracks
+sudo mount -t nfs "$MASTER_IP:/srv/radio/tracks" /mnt/radio-tracks
 findmnt /mnt/radio-tracks
 ```
 
@@ -229,9 +266,10 @@ temp-write-then-`rename()` pattern — see `README.md`).
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `access denied by server while mounting` | LAN-subnet export line missing, `insecure` missing, or `exportfs -ra` not run | Add the `192.168.1.0/24` line with `insecure`, re-export; re-check with `showmount -e` |
+| Master has no internet after setting the static address, or workers lost the master after a router change | The address is not in the subnet the router serves, so the machine cannot reach its gateway | Compare `ip route` with `MASTER_IP`; choose a free address on the gateway's subnet (Step 1), redo Step 2, update `/etc/exports` (Step 4) and every worker's `MASTER_IP` |
+| `access denied by server while mounting` | LAN-subnet export line missing, `insecure` missing, or `exportfs -ra` not run | Add the line for your `LAN_SUBNET` with `insecure`, re-export; re-check with `showmount -e` |
 | `bad option; ... need a /sbin/mount.<type> helper` | `nfs-common` not installed (classic WSL2 first attempt) | `sudo apt-get install -y nfs-common` |
-| `mount.nfs: Connection timed out` | Wrong IP, worker on a different subnet/VLAN (guest Wi-Fi), or firewall | `ping 192.168.1.210`, check router isolation settings ("AP/client isolation" off), Step 6 firewall rules |
+| `mount.nfs: Connection timed out` | Wrong IP, worker on a different subnet/VLAN (guest Wi-Fi), or firewall | `ping $MASTER_IP`, check router isolation settings ("AP/client isolation" off), Step 6 firewall rules |
 | `Permission denied` on write | `/srv/radio/tracks` not `1777` on the master | `sudo chmod 1777 /srv/radio/tracks` (root_squash is fine *because* 1777 absorbs uid differences) |
 | macOS `Read-only file system` creating the mount directory | `/mnt` does not exist and `/` cannot be written | use `/Volumes/radio-tracks` (Part 2, macOS) |
 | macOS `mount_nfs` refused | privileged-port requirement, or NFSv4 negotiation | retry with `-o vers=3,resvport` |

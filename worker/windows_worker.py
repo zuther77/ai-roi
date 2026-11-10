@@ -8,8 +8,8 @@ Per job: atomic claim (BRPOPLPUSH jobs:pending:windows -> jobs:in_progress),
 generate, write the track to the master's NFS mount, ack via LREM, and record
 the measured generation time for the queue manager's timing math.
 
-Environment (see worker/README.md for the full table): REDIS_URL,
-REDIS_PASSWORD, TRACKS_DIR, NFS_SOURCE, WORKER_MOUNT_NFS, WORKER_SHARED_SECRET,
+Environment (see worker/README.md for the full table): MASTER_IP (or
+REDIS_URL and NFS_SOURCE), REDIS_PASSWORD, TRACKS_DIR, WORKER_MOUNT_NFS, WORKER_SHARED_SECRET,
 WORKER_HEALTH_PORT, WORKER_LEASE_MULTIPLIER, WORKER_EXPECTED_PER_TARGET_SEC,
 WORKER_API_WAIT_SEC, ACESTEP_API_URL.
 """
@@ -29,7 +29,8 @@ from urllib.parse import urlparse
 
 from ace_client import AceStepClient, extract_audio_path
 from base import track_stem
-from redis_client import MiniRedis as _MiniRedis, RedisError
+from redis_client import (MiniRedis, RedisError, nfs_source_from_env,
+                          redis_url_from_env)
 from telemetry import Cached, gpu_temperature_c
 
 WORKER = "windows"
@@ -50,16 +51,11 @@ HEARTBEAT_SEC = 5
 EXPECTED_SEC_PER_TARGET_SEC = int(os.environ.get("WORKER_EXPECTED_PER_TARGET_SEC", "50"))
 LEASE_MULTIPLIER = float(os.environ.get("WORKER_LEASE_MULTIPLIER", "3"))
 
-DEFAULT_REDIS_URL = "redis://192.168.1.210:6379/0"
 ACESTEP_API_URL = os.environ.get("ACESTEP_API_URL", "http://127.0.0.1:8001")
 TRACKS_DIR = os.environ.get("TRACKS_DIR", "/app/tracks")
-NFS_SOURCE = os.environ.get("NFS_SOURCE", "192.168.1.210:/srv/radio/tracks")
+NFS_SOURCE = nfs_source_from_env()
 
 _busy = {"v": False}
-
-
-class MiniRedis(_MiniRedis):
-    default_host = "192.168.1.210"
 
 
 def log(event: str, **fields) -> None:
@@ -309,10 +305,19 @@ def start_health_server(state: dict) -> None:
 
 
 def main() -> int:
-    url = os.environ.get("REDIS_URL", DEFAULT_REDIS_URL)
+    url = redis_url_from_env()
+    if not url:
+        log("worker_start_error",
+            reason="master address not set: set MASTER_IP (or REDIS_URL)")
+        return 2
     password = os.environ.get("REDIS_PASSWORD", "")
     if not password:
         log("worker_start_error", reason="REDIS_PASSWORD not set")
+        return 2
+    if (_env_flag("WORKER_MOUNT_NFS", "1") and not os.path.ismount(TRACKS_DIR)
+            and not NFS_SOURCE):
+        log("worker_start_error",
+            reason="NFS export not set: set MASTER_IP (or NFS_SOURCE)")
         return 2
 
     parsed = urlparse(url)

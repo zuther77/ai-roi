@@ -90,20 +90,15 @@ services:
     command: >
       sh -c 'exec redis-server --requirepass "$$REDIS_PASSWORD" --appendonly yes'
 
-    # Published on specific interfaces — never 0.0.0.0 (spec v0.4.1):
-    #   * LAN/Wi-Fi (192.168.1.210) — the normative worker network since
-    #     the 2026-10-04 owner decision: EVERY worker, any OS, reaches
-    #     Redis here. requirepass is mandatory; reachable-from-LAN is by
-    #     design (see design-spec Section 3.5 networking).
-    #   * Legacy direct link (192.168.50.1) — NIC still configured; kept
-    #     until the link is physically retired.
-    # Binding fails if an interface is down — deliberate, not a bug.
-    # REDIS_BIND exists so a fresh clone can bring the stack up on a machine
-    # that is not this master (set it to 127.0.0.1, or 0.0.0.0 to serve any
-    # interface). The default is the master's static LAN address, so leaving
-    # it unset keeps the existing deployment behaviour exactly.
+    # Published on one interface only, never 0.0.0.0 (spec v0.4.1): the
+    # master's LAN address, MASTER_IP from .env. EVERY worker, any OS, reaches
+    # Redis there. requirepass is mandatory; reachable-from-LAN is by design
+    # (design-spec Section 3.5).
+    # Unset, it falls back to loopback, so a fresh clone starts with no worker
+    # exposure at all. Binding fails if MASTER_IP is not an address this
+    # machine holds: deliberate, so a wrong address stops loudly.
     ports:
-      - "${REDIS_BIND:-192.168.1.210}:6379:6379"
+      - "${MASTER_IP:-127.0.0.1}:6379:6379"
 
     # Day 6: queue persistence. appendonly + a named volume so pending and
     # in-progress jobs survive a Redis restart (the Day 4 skeleton accepted
