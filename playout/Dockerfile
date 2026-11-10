@@ -44,15 +44,15 @@ ENV PYTHONUNBUFFERED=1
 #
 # No requirements.txt and no pip install: the controller and filler pool use
 # only the Python standard library (sqlite3, subprocess, dataclasses), so the
-# image needs nothing beyond what python:3.12-slim already ships. Tests run on
-# stdlib unittest for the same reason.
+# image needs nothing beyond what python:3.12-slim already ships. Tests are not
+# baked in: they live in tests/playout/ and run from the repo root with
+# ./run_tests.sh playout.
 COPY stream.sh entrypoint.sh /app/
-COPY filler_pool.py playout_controller.py test_filler_pool.py /app/
+COPY filler_pool.py playout_controller.py /app/
 RUN chmod +x /app/stream.sh /app/entrypoint.sh
 
 # ENTRYPOINT is the Day 3 crash-loop backoff shell. CMD stays overridable so
 # ad-hoc debugging still works:
 #     docker compose run --entrypoint "" playout ffmpeg -version
-#     docker compose run --entrypoint "" playout python -m unittest -v
 #     docker compose run --entrypoint "" playout bash
 ENTRYPOINT ["/app/entrypoint.sh"]
