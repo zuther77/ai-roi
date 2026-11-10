@@ -84,8 +84,9 @@ public chat path, `YOUTUBE_DATA_API_KEY` + `YOUTUBE_VIDEO_ID`.
 Then open the read-only dashboard at <http://127.0.0.1:8081> — queue depth,
 mode, per-worker and per-provider health, stream uptime, now playing.
 
-To add a generation worker, follow [worker/setup.md](worker/setup.md) (NFS +
-LAN) and [worker/README.md](worker/README.md) (per-OS runbooks).
+To add a generation worker, do [worker/setup.md](worker/setup.md) first (address,
+NFS, mount, probe), then [worker/README.md](worker/README.md) to build and run
+the worker itself.
 
 **Redeploying a change:** `queue-*`, `provider-worker`, `status` and
 `chat-intake` read their code from a bind mount, so `up -d --build` will not
@@ -148,6 +149,6 @@ generations.
 
 | Document | What it covers |
 |---|---|
-| [worker/README.md](worker/README.md) | Worker runbooks, environment table, failure tests |
-| [worker/setup.md](worker/setup.md) | One-time master + worker setup (static IP, NFS, mounts) |
+| [worker/README.md](worker/README.md) | Build, run and verify a worker: environment table, leases and `/health`, failure tests |
+| [worker/setup.md](worker/setup.md) | One-time machine setup: master address, NFS server and export, client mounts, probe |
 | [tests/README.md](tests/README.md) | Test layout and what each area covers |

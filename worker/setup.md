@@ -1,5 +1,10 @@
 # worker/setup.md — Connect a worker to the master and prove it with a test file
 
+**Scope:** one-time machine setup — the master's address, its NFS server and
+export, the worker's NFS client mount, and a probe that proves the two can
+exchange a file. Building and running the worker processes themselves is
+[`README.md`](README.md), which does not repeat anything on this page.
+
 Goal: any worker — Windows, macOS, or Linux — connects to the master over
 the regular LAN/Wi-Fi (design spec Section 3.5, v0.4.1) and can WRITE a
 test file to the master's shared tracks directory over NFS. If the test
@@ -66,6 +71,10 @@ exported first:
 cat /etc/exports
 ```
 
+An older line scoped to a single address (`192.168.50.2`) may still be there
+from the retired direct Ethernet link. It is harmless; remove it whenever
+convenient.
+
 Export to the **whole LAN subnet** — accepted by the owner (2026-10-04,
 spec v0.4.2): this system targets single-household Wi-Fi, root_squash +
 the 1777 directory confine any LAN device to at most writing junk into
@@ -127,8 +136,15 @@ Notes, both learned the hard way on this project:
 - **Docker containers on this machine cannot bind-mount this path**
   (`timed out waiting ... to be automounted` — a Docker Desktop WSL2
   limitation): the *worker container* mounts the NFS export inside
-  itself instead. That is the Windows runbook in `worker/README.md`; this
+  itself instead. That is the Windows runbook in `README.md`; this
   page tests the machine-level mount.
+
+This machine also runs the containerized worker next to a containerized model
+server, so confirm Docker can see the GPU before leaving this page:
+
+```sh
+docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi
+```
 
 ### macOS worker (native, no WSL)
 
@@ -205,7 +221,7 @@ Clean up from either side (`rm "$TRACKS"/.probe-*` on the worker, or
 master's `/srv/radio/tracks`, and the master-written file is readable on
 the worker — over the LAN/Wi-Fi, no cables. This same path is how a
 worker's generated tracks reach the radio (with the atomic
-temp-write-then-`rename()` pattern — see `worker/README.md`).
+temp-write-then-`rename()` pattern — see `README.md`).
 
 ---
 
@@ -220,4 +236,4 @@ temp-write-then-`rename()` pattern — see `worker/README.md`).
 | macOS `Read-only file system` creating the mount directory | `/mnt` does not exist and `/` cannot be written | use `/Volumes/radio-tracks` (Part 2, macOS) |
 | macOS `mount_nfs` refused | privileged-port requirement, or NFSv4 negotiation | retry with `-o vers=3,resvport` |
 | Mounted earlier, `Stale file handle` now | Server re-exported (`exportfs -ra`) or rebooted underneath the mount | Re-run the mount command |
-| Docker: `timed out waiting ... to be automounted` | Docker Desktop WSL2 cannot pass a WSL-side NFS path into containers — a Windows-specific quirk, not a broken setup | The machine mount above stays for manual use; containers mount the export themselves (runbook in `worker/README.md`) |
+| Docker: `timed out waiting ... to be automounted` | Docker Desktop WSL2 cannot pass a WSL-side NFS path into containers — a Windows-specific quirk, not a broken setup | The machine mount above stays for manual use; containers mount the export themselves (runbook in `README.md`) |

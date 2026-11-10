@@ -1,5 +1,9 @@
 # worker/ — generation workers
 
+**Scope:** how to build, run and verify a worker. One-time machine setup
+(static address, NFS server, client mounts) is in [`setup.md`](setup.md) and is
+not duplicated here.
+
 Workers pull jobs from the master's Redis, generate audio, and write finished
 tracks to the master's NFS export. No model code lives in this directory: both
 local workers are slim stdlib clients over an **ACE-Step 1.5 API server**
@@ -34,81 +38,18 @@ Two runtimes, deliberately asymmetric:
 Unit tests live in `tests/worker/`; run them from the repo root with
 `./run_tests.sh worker`.
 
-## Worker networking & setup (any OS)
+## Prerequisites
 
-All workers — Windows, macOS, Linux — connect over the regular home LAN/Wi-Fi.
-Master's LAN address: **192.168.1.210** (static, set at the OS level; see
-`setup.md` Step 2). Workers run plain DHCP and self-register, so their
-addresses are never tracked.
-
-One-time prerequisites (owner):
-
-1. Fix the **master's** address at the OS level — `worker/setup.md` Step 2.
-2. Master NFS export to the LAN subnet (below) + `sudo exportfs -ra`.
-3. `docker compose up -d` on the master. Redis is reachable from the LAN by
-   design; the password is the boundary. Never bind 0.0.0.0.
-4. Worker connectivity check: `nc -vz 192.168.1.210 6379`.
-
-### Windows worker (WSL2 + Docker Desktop)
-
-Connect over normal Wi-Fi/Ethernet, then follow **Build** and **Run** below.
-The WSL2 quirks documented in Run (in-container NFS mount, `--cap-add
-SYS_ADMIN`) apply on any network.
-
-### macOS worker (native — MLX)
-
-macOS ships an NFS client. `/mnt` does not exist and `/` is read-only, so the
-mount point is `/Volumes` (full commands in `worker/setup.md`):
+[`setup.md`](setup.md) has been run on this machine: the master's address, its
+NFS export, and this worker's mount. Two checks before starting a worker:
 
 ```sh
-sudo mkdir -p /Volumes/radio-tracks
-sudo mount_nfs -o vers=3 192.168.1.210:/srv/radio/tracks /Volumes/radio-tracks
+nc -vz 192.168.1.210 6379        # master's Redis (Compose) is reachable
+findmnt /mnt/radio-tracks        # the export is mounted (macOS: mount | grep radio-tracks)
 ```
 
-If the mount is refused, retry with `-o vers=3,resvport`. Generation runs
-natively via ACE-Step-1.5's `start_api_server_macos.sh`; the Mac claims jobs
-with `python3 worker/mac_claim.py`.
-
-### Linux worker
-
-Native Docker, same Build + Run flow with local paths. None of the Docker
-Desktop / WSL2 quirks apply.
-
-## Prerequisites (master side)
-
-Redis is up (`192.168.1.210:6379`, Compose service). The NFS server must be
-installed and exporting on the master (owner-run once, needs sudo):
-
-```sh
-sudo apt-get install -y nfs-kernel-server
-sudo mkdir -p /srv/radio/tracks
-# Sticky-writable (/tmp model): the Windows WSL user (uid 1000) and squashed
-# root (root inside the worker container included) both need to write.
-sudo chmod 1777 /srv/radio/tracks
-# `insecure` is REQUIRED: WSL2's NAT remaps the NFS client's source port to an
-# unprivileged one, and nfsd rejects non-privileged ports without it.
-echo '/srv/radio/tracks 192.168.50.2(rw,sync,no_subtree_check,insecure)' | sudo tee -a /etc/exports
-# LAN/Wi-Fi workers (owner-accepted tradeoff): the whole subnet. This project
-# targets a single household; root_squash + the 1777 dir confine any LAN
-# device to writing junk into tracks at worst.
-echo '/srv/radio/tracks 192.168.1.0/24(rw,sync,no_subtree_check,insecure)' | sudo tee -a /etc/exports
-sudo exportfs -ra
-```
-
-The first export line is the legacy direct-link client, kept until that link
-is physically retired.
-
-## Windows: one-time setup (WSL2, inside any distro)
-
-```sh
-# Optional, for manual inspection only — the worker container mounts the
-# export itself (see Run).
-sudo mkdir -p /mnt/radio-tracks
-sudo mount -t nfs 192.168.1.210:/srv/radio/tracks /mnt/radio-tracks
-
-# GPU sanity check
-docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi
-```
+Workers run plain DHCP and self-register, so no worker address is configured
+anywhere — the master's `192.168.1.210` is the only address in the system.
 
 ## Checkpoints (model weights — NOT in the git repo)
 
@@ -295,6 +236,20 @@ python3 acceptance_mac.py
 
 Expect typed-exception OKs (no server needed), then `api_ready`, a real file in
 `mac-output/`, and a printed `generation_sec`.
+
+For production the Mac runs the claimer instead, from the repo root, with the
+model server still up in its own terminal:
+
+```sh
+cd <path-to>/ai-roi
+PYTHONUNBUFFERED=1 python3 worker/mac_claim.py
+```
+
+It claims from `jobs:pending:mac`, heartbeats `worker:mac`, and writes finished
+tracks to `MAC_OUTPUT_DIR`, which it defaults to the `/Volumes/radio-tracks`
+NFS mount from `setup.md`. `REDIS_PASSWORD` must be in its environment or it
+exits; `REDIS_URL` defaults to the master. System python is fine, since it is
+stdlib-only.
 
 ## Generated track file names
 
