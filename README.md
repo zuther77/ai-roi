@@ -8,6 +8,9 @@ The requirement everything else is designed around: **the stream never stops.**
 With every generation source dead — no workers, no API keys, no internet to the
 providers — the master keeps broadcasting from its local filler pool.
 
+
+## Demo Video 
+
 ## How it works
 
 ```
@@ -37,7 +40,17 @@ Generation happens **locally by default** on hardware you already have.
 Both local workers are slim stdlib clients over an
 [ACE-Step 1.5](https://github.com/ace-step/ACE-Step-1.5) API server, which owns
 the model, checkpoints and GPU/MLX engagement. Paid providers (ElevenLabs,
-Gemini Lyra) are genuinely optional and off unless you set a key.
+Gemini Lyra) are genuinely optional and off unless you set a key. 
+
+
+## Repo Setup 
+Clone the ACE-Step 1.5 repo and keep it outside this repo. I choose not to use submodules for now because I wanted the flixbility to change local model provider. 
+Feel free to use any other provider. You might need to create a CLI for that. Tell your agent to look at `worker/ace_client.py` as a reference implementation for ACE-Step1.5
+```  
+├──AIROI/                            # base directory can be named anything
+│     ├── ACE-Step 1.5/              # git clone https://github.com/ace-step/ACE-Step-1.5
+└──   └── ai-roi/                    # this repo
+```
 
 Three modes, via `GENERATION_MODE`:
 
