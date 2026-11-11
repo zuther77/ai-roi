@@ -59,16 +59,17 @@ master needs to be stable:
 ```sh
 nmcli con show --active                  # note your Wi-Fi connection name
 nmcli con mod "<your-wifi-connection>" ipv4.method manual \
-  ipv4.addresses "$MASTER_IP/24" ipv4.gateway "$GATEWAY" \
-  ipv4.dns "1.1.1.1 8.8.8.8" ipv4.ignore-auto-dns yes
+  ipv4.addresses "$MASTER_IP/24" ipv4.gateway "$GATEWAY" ipv4.dns "$GATEWAY"
 nmcli con up "<your-wifi-connection>"
 ip -4 -brief addr                        # confirm it now holds $MASTER_IP
-ping -c2 1.1.1.1 && nslookup registry-1.docker.io    # internet + DNS still work
+ping -c2 "$GATEWAY" && ping -c2 github.com   # router reachable, names resolve
 ```
 
-Public DNS servers are used on purpose: some home routers drop DNS queries
-from containers, which breaks `docker build` with a lookup timeout. (The GUI
-equivalent: Settings -> Wi-Fi -> your network -> IPv4 -> Manual.)
+`ipv4.dns` points at the router. A manual address takes nothing from DHCP,
+so without a DNS entry the machine would have no resolver at all. The router
+forwards lookups to whichever ISP you are on, so this survives a provider
+change. (The GUI equivalent: Settings -> Wi-Fi -> your network -> IPv4 ->
+Manual.)
 
 **Step 3 — Install and configure the NFS server** (skip the install line
 if already done — it is on this master):
