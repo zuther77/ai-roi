@@ -16,60 +16,52 @@ Addressing (spec v0.4.2 — near-zero bookkeeping):
 
 | Machine | Address | Notes |
 |---|---|---|
-| Master (Linux box) | `$MASTER_IP` | static, set at the OS level (Steps 1-2); your choice, never hardcoded in the repo |
-| Any worker | plain DHCP | workers are never referenced by address — they connect to the master and self-register (worker registry); no router configuration for anyone |
+| Master (Linux box) | `$MASTER_IP` | whatever address the router's DHCP gave it, read from the machine in Step 1; never hardcoded in the repo |
+| Any worker | plain DHCP | workers are never referenced by address — they connect to the master and self-register (worker registry) |
 
-One address in the whole system: the master's. It is the single value you
-choose (`MASTER_IP`); the repo has no address of its own, so nothing needs
-editing when you change routers or networks. Every command below uses shell
+One address in the whole system: the master's. It is the single value
+`MASTER_IP`; the repo has no address of its own, so changing routers or
+networks means changing that one value. Nothing on the master is changed at
+the OS level: no static IP, no DNS override. Every command below uses shell
 variables, defined once in Step 1.
 
 ---
 
 ## Part 1 — Master side (once, needs sudo)
 
-**Step 1 — Read your network, then name the three values.**
+**Step 1 — Read the master's address from the machine.** Nothing is
+configured here; the router already gave the master an address.
 
 ```sh
-ip route                 # "default via X" is your router (GATEWAY)
-ip -4 -brief addr        # your LAN interface and its current address
+export MASTER_IP=$(ip -4 route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}')
+export LAN_SUBNET=$(ip -4 route | awk -v ip="$MASTER_IP" '$0 ~ "src "ip"( |$)" {print $1; exit}')
+echo "$MASTER_IP  $LAN_SUBNET"          # e.g. 10.0.0.106  10.0.0.0/24
 ```
 
-The master's address must be **inside the subnet your router serves**. A
-static address from a different subnet cannot reach the router, so the
-machine loses the internet and the LAN. This happened here after a router
-swap changed the network from `192.168.1.x` to `10.0.0.x`. Pick a free
-address outside the router's DHCP pool, in the same subnet as the gateway.
-Example values (use your own):
+`ip route get` asks the kernel which address it uses to reach the internet,
+so Docker's own `172.x` interfaces are never picked. Keep this shell open
+for Parts 1-3, or re-run those two lines in a new one. Put the same
+`MASTER_IP` in the repo's `.env` (Redis is published on it) and on each
+worker.
 
-```sh
-export MASTER_IP=10.0.0.210       # free address on your router's subnet
-export GATEWAY=10.0.0.1           # the "default via" address above
-export LAN_SUBNET=10.0.0.0/24     # your network; /24 is the common home size
-```
+**Step 2 — Decide how stable that address needs to be.** The architecture is
+pull-based: workers connect TO the master (Redis, NFS), so only the master's
+address matters, and a home router normally hands the same address back to
+the same machine. Two honest options:
 
-Keep this shell open for Parts 1-3, or re-run these three lines in a new one.
-Put the same `MASTER_IP` in the repo's `.env` too (Redis is published on it).
+* **Do nothing.** Right for a first run. If the router ever gives the master
+  a different address (after a long power-off, or a router swap), the symptom
+  is loud: Redis fails to start because `MASTER_IP` is no longer an address
+  the machine holds, and workers time out. The fix is to repeat Step 1 and
+  update `MASTER_IP` in the master's `.env` and on each worker.
+* **Reserve it in the router.** In the router's admin page, bind the
+  master's Wi-Fi MAC address (`ip link show`) to its current address. The
+  master still uses plain DHCP, so nothing changes on the machine itself, and
+  the address cannot move.
 
-**Step 2 — Fix the master's address at the OS level (no router).** The
-architecture is pull-based: workers connect TO the master (Redis, NFS)
-and self-register, so a worker's own address never matters. Only the
-master needs to be stable:
-
-```sh
-nmcli con show --active                  # note your Wi-Fi connection name
-nmcli con mod "<your-wifi-connection>" ipv4.method manual \
-  ipv4.addresses "$MASTER_IP/24" ipv4.gateway "$GATEWAY" ipv4.dns "$GATEWAY"
-nmcli con up "<your-wifi-connection>"
-ip -4 -brief addr                        # confirm it now holds $MASTER_IP
-ping -c2 "$GATEWAY" && ping -c2 github.com   # router reachable, names resolve
-```
-
-`ipv4.dns` points at the router. A manual address takes nothing from DHCP,
-so without a DNS entry the machine would have no resolver at all. The router
-forwards lookups to whichever ISP you are on, so this survives a provider
-change. (The GUI equivalent: Settings -> Wi-Fi -> your network -> IPv4 ->
-Manual.)
+Do **not** set a static address on the master with `nmcli`. On this project's
+network doing so left the Wi-Fi interface with no address and took the
+machine offline; letting DHCP assign it avoids that whole class of problem.
 
 **Step 3 — Install and configure the NFS server** (skip the install line
 if already done — it is on this master):
@@ -94,9 +86,9 @@ exported first:
 cat /etc/exports
 ```
 
-A line left over from an earlier network (a single old address, or an old
-subnet after a router change) is harmless but dead. Remove it whenever
-convenient; it does not grant access on the new network.
+A line left over from an earlier network (an old subnet after a router
+change) is harmless but dead. Remove it whenever convenient; it does not
+grant access on the new network.
 
 Export to the **whole LAN subnet** — accepted by the owner (2026-10-04,
 spec v0.4.2): this system targets single-household Wi-Fi, root_squash +
@@ -147,11 +139,11 @@ a worker that can also reach the queue will additionally pass
 
 ## Part 2 — Worker side, per OS
 
-On the worker, set the master's address once per shell (the same
-`MASTER_IP` as Step 1; the worker needs no other value):
+On the worker, set the master's address once per shell (the `MASTER_IP`
+printed by Step 1 on the master; the worker needs no other value):
 
 ```sh
-export MASTER_IP=10.0.0.210
+export MASTER_IP=<master address from Step 1>
 ```
 
 ### Windows worker (Windows Home: WSL2 is the NFS client)
@@ -267,7 +259,7 @@ temp-write-then-`rename()` pattern — see `README.md`).
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Master has no internet after setting the static address, or workers lost the master after a router change | The address is not in the subnet the router serves, so the machine cannot reach its gateway | Compare `ip route` with `MASTER_IP`; choose a free address on the gateway's subnet (Step 1), redo Step 2, update `/etc/exports` (Step 4) and every worker's `MASTER_IP` |
+| Workers (or Redis) stop working after a reboot or router change | The router gave the master a new address, so `MASTER_IP` is stale. Redis fails to bind and workers time out | Repeat Step 1 on the master, update `MASTER_IP` in its `.env` and on each worker, then `docker compose up -d redis`. Reserve the address in the router (Step 2) to stop it recurring |
 | `access denied by server while mounting` | LAN-subnet export line missing, `insecure` missing, or `exportfs -ra` not run | Add the line for your `LAN_SUBNET` with `insecure`, re-export; re-check with `showmount -e` |
 | `bad option; ... need a /sbin/mount.<type> helper` | `nfs-common` not installed (classic WSL2 first attempt) | `sudo apt-get install -y nfs-common` |
 | `mount.nfs: Connection timed out` | Wrong IP, worker on a different subnet/VLAN (guest Wi-Fi), or firewall | `ping $MASTER_IP`, check router isolation settings ("AP/client isolation" off), Step 6 firewall rules |

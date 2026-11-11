@@ -1,7 +1,7 @@
 # worker/ — generation workers
 
 **Scope:** how to build, run and verify a worker. One-time machine setup
-(static address, NFS server, client mounts) is in [`setup.md`](setup.md) and is
+(the master's address, NFS server, client mounts) is in [`setup.md`](setup.md) and is
 not duplicated here.
 
 Workers pull jobs from the master's Redis, generate audio, and write finished
