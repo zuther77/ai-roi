@@ -213,7 +213,12 @@ def _http(req: urllib.request.Request) -> dict:
         raw = exc.read()
         raise YouTubeError(f"youtube http {exc.code}", exc.code, _error_reason(raw)) from None
     except (urllib.error.URLError, OSError) as exc:
-        raise YouTubeError(f"youtube unreachable: {type(exc).__name__}") from None
+        # A URLError wraps the real cause (DNS failure, timeout, refused) in
+        # .reason. Neither carries the request URL, so the API key in the
+        # query string cannot leak into the log through here.
+        cause = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+        raise YouTubeError(
+            f"youtube unreachable: {type(exc).__name__}: {cause}") from None
     return json.loads(raw.decode("utf-8")) if raw else {}
 
 
